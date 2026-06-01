@@ -8,7 +8,6 @@ const {
   como,
 } = getGlobalScriptingContext();
 
-
 export async function defineSharedState(como) {
   return {
     classDescription: {
@@ -40,8 +39,7 @@ let labels = null;
 let model = null;
 let recordExample = null; // array containing the example when record is true
 let previewLabel = null; // bypass decoded label to preview some soundfile
-/*let previewSrc = null;*/
-let previewSource = null;
+let previewSrc = null;
 let unsubscribeModel = null;
 
 class ParallelSynth {
@@ -139,48 +137,20 @@ export async function enter(context) {
     for (let [key, value] of Object.entries(updates)) {
       switch (key) {
         case 'record': {
-          if (value === true) {
+          // @todo - ack or refuse example
+          if (Array.isArray(recordExample) && value === false) {
             const label = state.get('recordLabel');
-
-            if (!label) {
-              console.warn('[xmm-test] Impossible de record : recordLabel est null');
-              recordExample = null;
-              return;
-            }
-
-            recordExample = [];
-            console.log(`[xmm-test] start recording "${label}"`);
-          }
-
-          if (value === false && Array.isArray(recordExample)) {
-            const label = state.get('recordLabel');
-
-            if (!label) {
-              console.warn('[xmm-test] Impossible d’ajouter l’exemple : recordLabel est null');
-              recordExample = null;
-              return;
-            }
-
-            if (recordExample.length === 0) {
-              console.warn('[xmm-test] Exemple vide');
-              recordExample = null;
-              return;
-            }
-
-            console.log(`[xmm-test] add example "${label}"`, recordExample.length);
-
-            await model.addExample(label, recordExample);
-
+            model.addExample(label, recordExample);
             recordExample = null;
+          } else {
+            recordExample = [];
           }
-
-          break;
         }
+        break;
       }
     }
   }, true);
 }
-
 
 export async function exit(context) {
   const { output, state, soundbank, scriptName } = context;
@@ -217,11 +187,9 @@ export async function process(context, frame) {
     forceLabel = state.get('previewLabel') || null;
   }
 
-
   // audio synthesis
   if (forceLabel && forceLabel !== previewLabel) {
     previewLabel = forceLabel;
-
     parallelSynth.fadeOut();
 
     if (previewSource) {
@@ -229,24 +197,13 @@ export async function process(context, frame) {
       previewSource = null;
     }
 
-    const buffer = soundbank[forceLabel];
-
-    if (buffer) {
-      previewSource = new AudioBufferSourceNode(audioContext, {
-        buffer,
-        loop: true,
-      });
-
-      previewSource.connect(output);
-      previewSource.start();
-    }
-  } else if (!forceLabel) {
+    const buffer = soundbank[currentLabel];
+    previewSource = new AudioBufferSourceNode(audioContext, { buffer, loop: true });
+    previewSource.connect(output);
+    previewSource.start();
+  } else {
     previewLabel = null;
-
     parallelSynth.fadeIn();
-
-    if (results) {
-      parallelSynth.process(results);
-    }
+    parallelSynth.process(results);
   }
 }

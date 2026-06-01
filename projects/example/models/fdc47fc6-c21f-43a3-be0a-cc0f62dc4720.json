@@ -1,0 +1,34 @@
+{
+  "uuid": "fdc47fc6-c21f-43a3-be0a-cc0f62dc4720",
+  "id": "gesture-education",
+  "config": {
+    "target": {
+      "name": "xmm"
+    },
+    "payload": {
+      "modelType": "gmm",
+      "gaussians": 1,
+      "absoluteRegularization": 0.01,
+      "relativeRegularization": 0.01,
+      "covarianceMode": "full",
+      "states": 1,
+      "transitionMode": "ergodic",
+      "regressionEstimator": "full",
+      "likelihoodWindow": 10
+    }
+  },
+  "parameters": {
+    "gaussians": 1,
+    "regularization": {
+      "relative": 0.01,
+      "absolute": 0.01
+    },
+    "covarianceMode": "full",
+    "bimodal": false,
+    "inputDimension": 0,
+    "outputDimension": 0,
+    "dimension": 0,
+    "classes": {}
+  },
+  "examples": []
+}

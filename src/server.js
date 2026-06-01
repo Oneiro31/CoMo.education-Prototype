@@ -7,11 +7,6 @@ import { loadConfig, configureHttpRouter } from '@soundworks/helpers/server.js';
 
 import ComoServer from '@ircam/como/ComoServer.js';
 
-// - General documentation: https://soundworks.dev/
-// - API documentation:     https://soundworks.dev/api
-// - Issue Tracker:         https://github.com/collective-soundworks/soundworks/issues
-// - Wizard & Tools:        `npx soundworks`
-
 const config = loadConfig(process.env.ENV, import.meta.url);
 
 const PROJECTS_DIRNAME = 'projects';
@@ -30,6 +25,7 @@ configureHttpRouter(server);
 const como = new ComoServer(server, {
   projectsDirname: PROJECTS_DIRNAME,
 });
+
 
 como.stateManager.defineClass('controller', {
   showEditScriptPanel: {

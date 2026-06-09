@@ -1,31 +1,24 @@
-
 const {
   audioContext,
   como,
 } = getGlobalScriptingContext();
 
-const MODEL_ID = 'gesture-sound';
 
-let model = null;
-let currentExample = null;
-let unsubscribeState = null;
-let unsubscribeModel = null;
-
-let lastTriggeredLabel = null;
-let lastTriggerTime = 0;
-let lastClearAllRequest = 0;
-
+// -------- Share State ----------
 export async function defineSharedState() {
   return {
     classDescription: {
       labels: {
         type: 'any',
-        default: [] },
+        default: [],
+      },
 
       selectedLabel: {
         type: 'string',
         default: null,
-        nullable: true },
+        nullable: true,
+      },
+
 
       previewLabel: {
         type: 'string',
@@ -33,10 +26,12 @@ export async function defineSharedState() {
         nullable: true,
       },
 
+
       record: {
         type: 'boolean',
         default: false,
       },
+
 
       mode: {
         type: 'string',
@@ -48,30 +43,17 @@ export async function defineSharedState() {
         default: false,
       },
 
+
       recognizedLabel: {
         type: 'string',
         default: null,
         nullable: true,
       },
 
-      scores: {
-        type: 'any',
-        default: {},
-      },
 
       examples: {
         type: 'any',
-        default: {} },
-
-      threshold: {
-        type: 'float',
-        default: 0.65,
-      },
-
-      // Faire autrement pour boucler ?
-      cooldown: {
-        type: 'integer',
-        default: 800,
+        default: {},
       },
 
 
@@ -81,25 +63,30 @@ export async function defineSharedState() {
         nullable: true,
       },
 
+
       clearLabel: {
         type: 'string',
         default: null,
         nullable: true,
       },
 
+
       clearAllRequest: {
         type: 'integer',
         default: 0,
       },
+
 
       status: {
         type: 'string',
         default: 'idle',
       },
 
+
       lastMessage: {
         type: 'string',
-        default: '' },
+        default: '',
+      },
 
       lastError: {
         type: 'string',
@@ -111,10 +98,306 @@ export async function defineSharedState() {
   };
 }
 
+
+
+const MODEL_ID = 'gesture-sound_short';
+const MODEL_PRESET = 'shortGestures';
+
+const FRAME_TIMEOUT_MS = 500;
+const FRAME_TIMEOUT_INTERVAL_MS = 200;
+
+let model = null;
+let synth = null;
+let recordExample = null;
+let unsubscribeState = null;
+let unsubscribeModel = null;
+let lastClearAllRequest = 0;
+let frameTimeoutInterval = null;
+let lastFrameTime = 0;
+
+
+
+// -------- Audio Synthesis  -------------------
+class GestureSoundSynth {
+  constructor({ audioContext, soundbank, output }) {
+    this.audioContext = audioContext;
+    this.soundbank = soundbank;
+
+    // CoMo output
+    this.output = output;
+
+    // General gain of the synthesis
+    this.master = new GainNode(this.audioContext, {
+      gain: 1,
+    });
+
+    this.master.connect(this.output);
+    this.activeSources = new Set();
+    this.currentChannel = null;
+    this.currentLoopLabel = null;
+
+  }
+
+  get labels() {
+    return Object.keys(this.soundbank);
+  }
+
+  hasSound(label) {
+    return Boolean(label && this.soundbank[label]);
+  }
+
+  // --- Fade In ---
+  fadeIn(time = 0.2) {
+    this.master.gain.setTargetAtTime(
+      1,
+      this.audioContext.currentTime,
+      time,
+    );
+  }
+
+
+  // --- Fade Out ---
+  fadeOut(time = 0.2) {
+    this.master.gain.setTargetAtTime(
+      0,
+      this.audioContext.currentTime,
+      time,
+    );
+  }
+
+
+  // ---------- Play Sound ---------
+  play(label, options = {}) {
+    const {
+      gain = 1,
+      loop = false,
+      when = this.audioContext.currentTime,
+      fadeInTime = 0,
+      onEnded = null,
+    } = options;
+
+    const buffer = this.soundbank[label];
+
+    if (!buffer) {
+      console.warn(`No sound found for "${label}"`);
+      return null;
+    }
+
+    const src = new AudioBufferSourceNode(this.audioContext, {
+      buffer,
+      loop,
+    });
+
+    const amplitude = new GainNode(this.audioContext, {
+      gain: fadeInTime > 0 ? 0 : gain,
+    });
+
+    src.connect(amplitude).connect(this.master);
+
+    const channel = {
+      label,
+      src,
+      amplitude,
+    };
+
+    this.activeSources.add(channel);
+
+    src.onended = () => {
+      this.activeSources.delete(channel);
+
+      if (this.currentChannel === channel) {
+        this.currentChannel = null;
+      }
+
+      if (this.currentLoopLabel === label && this.currentChannel === null) {
+        this.currentLoopLabel = null;
+      }
+
+      try {
+        src.disconnect();
+        amplitude.disconnect();
+      } catch (err) {}
+
+      if (typeof onEnded === 'function') {
+        onEnded(channel);
+      }
+
+    };
+
+    src.start(when);
+
+    if (fadeInTime > 0) {
+      amplitude.gain.setValueAtTime(0, when);
+      amplitude.gain.setTargetAtTime(gain, when, fadeInTime);
+    }
+
+    return channel;
+  }
+
+  // ---------- Preview Sound ---------
+  preview(label, options = {}) {
+    const {
+      onEnded = null,
+    } = options;
+
+    //  We cut what's playing and reset the volume to 1.
+    this.stopAll();
+
+    this.master.gain.setValueAtTime(
+      1,
+      this.audioContext.currentTime,
+    );
+
+    const channel = this.play(label, {
+      gain: 1,
+      loop: false,
+      onEnded,
+    });
+
+    this.currentChannel = channel;
+
+    return channel;
+  }
+
+  // ---------- Loop Sound ---------
+  loop(label, options = {}) {
+    const {
+      fadeInTime = 0.1,
+      fadeOutTime = 0.1,
+      gain = 1,
+    } = options;
+
+    if (this.currentLoopLabel === label && this.currentChannel) {
+      return this.currentChannel;
+    }
+
+    // Old sound: fade out
+    for (const channel of [...this.activeSources]) {
+      this.stopChannel(channel, {
+        fade: true,
+        fadeOutTime,
+      });
+    }
+
+    // New sound : fade in
+    const channel = this.play(label, {
+      gain,
+      loop: true,
+      fadeInTime,
+    });
+
+    this.currentChannel = channel;
+    this.currentLoopLabel = label;
+
+    return channel;
+  }
+
+
+  // ---------- Stop Channel ---------
+  stopChannel(channel, options = {}) {
+    if (!channel) {
+      return;
+    }
+
+    const {
+      fade = false,
+      fadeOutTime = 0.1,
+      stopDelay = fadeOutTime * 2,
+    } = options;
+
+    if (fade) {
+      const now = this.audioContext.currentTime;
+      const stopTime = now + stopDelay;
+
+      try {
+        channel.amplitude.gain.cancelScheduledValues(now);
+        channel.amplitude.gain.setValueAtTime(channel.amplitude.gain.value, now);
+        channel.amplitude.gain.setTargetAtTime(0, now, fadeOutTime);
+
+        channel.src.stop(stopTime);
+      } catch (err) {}
+    } else {
+      try {
+        channel.src.stop();
+      } catch (err) {}
+    }
+
+    this.activeSources.delete(channel);
+
+    if (this.currentChannel === channel) {
+      this.currentChannel = null;
+      this.currentLoopLabel = null;
+    }
+  }
+
+
+  // ------ Stop All ------
+  stopAll(options = {}) {
+    for (const channel of [...this.activeSources]) {
+      this.stopChannel(channel, options);
+    }
+
+    if (!options.fade) {
+      this.activeSources.clear();
+    }
+
+    this.currentChannel = null;
+    this.currentLoopLabel = null;
+  }
+
+
+  // ------ Disconnect ------
+  disconnect() {
+    this.stopAll();
+
+    try {
+      this.master.disconnect();
+    } catch (err) {}
+  }
+}
+
+
+
+// --------------- Enter () --------------
 export async function enter(context) {
-  const { state, soundbank } = context;
+  const { state, soundbank, output } = context;
+
+  synth = new GestureSoundSynth({
+    audioContext,
+    soundbank,
+    output,
+  });
+
+
+  lastFrameTime = performance.now();
+
+  frameTimeoutInterval = setInterval(() => {
+    if (!synth || !state) {
+      return;
+    }
+
+    const now = performance.now();
+    const time = now - lastFrameTime;
+
+    const isPlaying = state.get('mode') === 'play';
+
+    if (isPlaying && time > FRAME_TIMEOUT_MS) {
+      synth.stopAll({
+        fade: true,
+        fadeOutTime: 0.05,
+      });
+
+      state.set({
+        recognizedLabel: null,
+        status: 'source-timeout',
+        lastMessage: 'Pas de données IMU : son arrêté.',
+      });
+    }
+  }, FRAME_TIMEOUT_INTERVAL_MS);
+
 
   const labels = Object.keys(soundbank);
+
 
   await state.set({
     labels,
@@ -124,14 +407,14 @@ export async function enter(context) {
     mode: 'learn',
     training: false,
     recognizedLabel: null,
-    scores: {},
     examples: {},
     status: 'loading-model',
     lastMessage: 'Chargement du modèle XMM...',
-    lastError: '',
   });
 
-  model = await como.modelManager.getModel(MODEL_ID);
+  model = await como.modelManager.getModel(MODEL_ID, {
+    preset: MODEL_PRESET,
+  });
 
   syncExamplesToState(state);
 
@@ -145,15 +428,71 @@ export async function enter(context) {
 
   unsubscribeState = state.onUpdate(async updates => {
     try {
-      if ('previewLabel' in updates && updates.previewLabel) {
-        playSound(context, updates.previewLabel);
+      if ('previewLabel' in updates) {
+        const label = updates.previewLabel;
+
+        if (label) {
+          const channel = synth.preview(label, {
+            onEnded: () => {
+              // Ne réinitialise que si ce son est toujours l'aperçu courant
+              if (state.get('previewLabel') === label) {
+                void state.set({
+                  previewLabel: null,
+                  lastMessage: `Lecture terminée : "${label}"`,
+                }).catch(err => {
+                  console.error(
+                    '[gesture-sound] erreur de fin de preview :',
+                    err,
+                  );
+                });
+              }
+            },
+          });
+
+          if (!channel) {
+            await state.set({
+              previewLabel: null,
+              lastError: `Impossible de lire le son "${label}".`,
+            });
+
+            return;
+          }
+
+          await state.set({
+            lastMessage: `Lecture de "${label}"`,
+            lastError: '',
+          });
+        } else {
+          synth.stopAll({
+            fade: true,
+            fadeOutTime: 0.1,
+          });
+
+          await state.set({
+            lastMessage: 'Lecture arrêtée.',
+          });
+        }
+      }
+
+
+      if ('selectedLabel' in updates) {
+        if (synth) {
+          synth.stopAll({
+            fade: true,
+            fadeOutTime: 0.1,
+          });
+        }
 
         await state.set({
-          previewLabel: null,
-          lastMessage: `Lecture de "${updates.previewLabel}"`,
-          lastError: '',
+          recognizedLabel: null,
+          status: 'ready',
+          lastMessage: updates.selectedLabel
+            ? `Son sélectionné : ${updates.selectedLabel}`
+            : 'Aucun son sélectionné',
         });
+
       }
+
 
       if ('record' in updates) {
         if (updates.record === true) {
@@ -161,6 +500,23 @@ export async function enter(context) {
         } else {
           await stopRecordingAndTrain(state);
         }
+      }
+
+      if ('mode' in updates) {
+        if (updates.mode !== 'play' && synth) {
+          synth.stopAll({
+            fade: true,
+            fadeOutTime: 0.1,
+          });
+        }
+
+        await state.set({
+          recognizedLabel: null,
+          status: updates.mode === 'play' ? 'playing' : 'ready',
+          lastMessage: updates.mode === 'play'
+            ? 'Mode de jeu activé'
+            : 'Mode d’apprentissage activé',
+        });
       }
 
       if ('deleteExampleUuid' in updates && updates.deleteExampleUuid) {
@@ -180,7 +536,7 @@ export async function enter(context) {
         }
       }
     } catch (err) {
-      console.error('[gesture-sound] state update error:', err);
+      console.error('state update error:', err);
 
       await state.set({
         training: false,
@@ -196,6 +552,8 @@ export async function enter(context) {
   });
 }
 
+
+// -------- Exit () ------------------
 export async function exit() {
   if (unsubscribeState) {
     unsubscribeState();
@@ -207,30 +565,47 @@ export async function exit() {
     unsubscribeModel = null;
   }
 
+  if (synth) {
+    synth.disconnect();
+    synth= null;
+  }
+
   if (model) {
     await model.detach();
     model = null;
   }
 
-  currentExample = null;
+  if (frameTimeoutInterval) {
+    clearInterval(frameTimeoutInterval);
+    frameTimeoutInterval = null;
+  }
+
+  recordExample = null;
 }
 
-export function process(context, frame) {
+
+// ---------- Process () --------------------
+export async function process(context, frame) {
+  lastFrameTime = performance.now();
+
   const { state } = context;
 
   if (!model || state.get('training')) {
     return;
   }
 
-  const xmmFrame = frameToXmmVector(frame);
-
-  if (!xmmFrame) {
-    return;
-  }
+  const xmmFrame = [
+    frame[0].accelerometer.x,
+    frame[0].accelerometer.y,
+    frame[0].accelerometer.z,
+    frame[0].gyroscope.x,
+    frame[0].gyroscope.y,
+    frame[0].gyroscope.z,
+  ];
 
   if (state.get('record')) {
-    if (currentExample) {
-      currentExample.push(xmmFrame);
+    if (recordExample) {
+      recordExample.push(xmmFrame);
     }
 
     return;
@@ -245,6 +620,7 @@ export function process(context, frame) {
   try {
     results = model.process(xmmFrame);
   } catch (err) {
+    console.error('Erreur process :', err);
     return;
   }
 
@@ -252,40 +628,64 @@ export function process(context, frame) {
     return;
   }
 
-  const scores = resultsToScores(results);
+  const labels = results.labels;
+  const scores = results.smoothedNormalizedLikelihoods;
 
-  state.set({ scores });
-
-  const winner = getWinner(results, state.get('threshold'));
-
-  if (!winner) {
+  if (
+    !Array.isArray(labels)
+    || !scores
+    || labels.length === 0
+  ) {
     return;
   }
 
-  const now = audioContext.currentTime * 1000;
-  const cooldown = state.get('cooldown');
+  let winnerLabel = null;
+  let winnerScore = -Infinity;
 
-  if (!shouldTrigger(winner.label, now, cooldown)) {
-    return;
-  }
+  labels.forEach((label, index) => {
+    const score = Number(scores[index]);
 
-  playSound(context, winner.label);
-
-  lastTriggeredLabel = winner.label;
-  lastTriggerTime = now;
-
-  state.set({
-    recognizedLabel: winner.label,
-    status: 'recognized',
-    lastMessage: `Geste reconnu : "${winner.label}"`,
+    if (Number.isFinite(score) && score > winnerScore) {
+      winnerLabel = label;
+      winnerScore = score;
+    }
   });
+
+  if (!winnerLabel) {
+    synth?.stopAll({
+      fade: true,
+      fadeOutTime: 0.3,
+    });
+
+    return;
+  }
+
+  if (!synth) {
+    return;
+  }
+
+  synth.loop(winnerLabel, {
+    fadeInTime: 0.2,
+    fadeOutTime: 0.1,
+  });
+
+  if (state.get('recognizedLabel') !== winnerLabel) {
+    state.set({
+      recognizedLabel: winnerLabel,
+      status: 'recognized',
+      lastMessage: `Geste reconnu : ${winnerLabel}`,
+      lastError: '',
+    });
+  }
 }
 
+
+// ------- Start Recording --------
 async function startRecording(state) {
   const label = state.get('selectedLabel');
 
   if (!label) {
-    currentExample = null;
+    recordExample = null;
 
     await state.set({
       record: false,
@@ -296,12 +696,11 @@ async function startRecording(state) {
     return;
   }
 
-  currentExample = [];
+  recordExample = [];
 
   await state.set({
     mode: 'learn',
     training: false,
-    scores: {},
     recognizedLabel: null,
     status: 'recording',
     lastMessage: `Enregistrement du geste pour "${label}"...`,
@@ -309,14 +708,16 @@ async function startRecording(state) {
   });
 }
 
+
+// ------- Stop Recording and Train --------
 async function stopRecordingAndTrain(state) {
-  if (!currentExample) {
+  if (!recordExample) {
     return;
   }
 
   const label = state.get('selectedLabel');
-  const example = currentExample;
-  currentExample = null;
+  const example = recordExample;
+  recordExample = null;
 
   if (!label) {
     await state.set({
@@ -353,6 +754,8 @@ async function stopRecordingAndTrain(state) {
   });
 }
 
+
+// ------- Delete Example --------
 async function deleteExample(state, uuid) {
   await state.set({
     training: true,
@@ -372,12 +775,13 @@ async function deleteExample(state, uuid) {
   });
 }
 
+
+// ------- Delete All Example --------
 async function clearExamplesForLabel(state, label) {
   await state.set({
     training: true,
     status: 'clearing-label',
     lastMessage: `Suppression des gestes pour "${label}"...`,
-    lastError: '',
   });
 
   await model.clearExamples(label);
@@ -391,13 +795,12 @@ async function clearExamplesForLabel(state, label) {
   });
 }
 
-
+// ------ Clear all Examples ------
 async function clearAllExamples(state) {
   await state.set({
     training: true,
     status: 'clearing-all',
     lastMessage: 'Suppression de tous les gestes...',
-    lastError: '',
   });
 
   await model.clearExamples();
@@ -406,13 +809,13 @@ async function clearAllExamples(state) {
   await state.set({
     training: false,
     status: 'ready',
-    scores: {},
     recognizedLabel: null,
     lastMessage: 'Tous les gestes ont été supprimés.',
   });
 }
 
 
+// ------ Sync Examples from Model State to Shared State -----
 function syncExamplesToState(state) {
   if (!model) {
     return;
@@ -426,32 +829,7 @@ function syncExamplesToState(state) {
 }
 
 
-function frameToXmmVector(frame) {
-  const data = Array.isArray(frame) ? frame[0] : frame;
-
-  if (!data) {
-    return null;
-  }
-
-  const acc = data.accelerometer || data.accelerationIncludingGravity;
-
-  if (!acc) {
-    return null;
-  }
-
-  const values = [
-    Number(acc.x),
-    Number(acc.y),
-    Number(acc.z),
-  ];
-
-  if (!values.every(Number.isFinite)) {
-    return null;
-  }
-
-  return values;
-}
-
+// ------ Validate Example Format --------
 function isValidExample(example) {
   if (!Array.isArray(example) || example.length === 0) {
     return false;
@@ -472,63 +850,4 @@ function isValidExample(example) {
       && frame.length === dimension
       && frame.every(value => Number.isFinite(value));
   });
-}
-
-function resultsToScores(results) {
-  const scores = {};
-
-  if (!results.labels || !results.smoothedNormalizedLikelihoods) {
-    return scores;
-  }
-
-  results.labels.forEach((label, index) => {
-    scores[label] = results.smoothedNormalizedLikelihoods[index];
-  });
-
-  return scores;
-}
-
-function getWinner(results, threshold) {
-  if (!results.labels || !results.smoothedNormalizedLikelihoods) {
-    return null;
-  }
-
-  let best = null;
-
-  results.labels.forEach((label, index) => {
-    const score = results.smoothedNormalizedLikelihoods[index];
-
-    if (!best || score > best.score) {
-      best = { label, score };
-    }
-  });
-
-  if (!best || best.score < threshold) {
-    return null;
-  }
-
-  return best;
-}
-
-function shouldTrigger(label, now, cooldownMs) {
-  if (label !== lastTriggeredLabel) {
-    return true;
-  }
-
-  return now - lastTriggerTime >= cooldownMs;
-}
-
-function playSound(context, label) {
-  const { output, soundbank } = context;
-  const buffer = soundbank[label];
-
-  if (!buffer) {
-    console.warn(`[gesture-sound] Aucun son trouvé pour "${label}"`);
-    return;
-  }
-
-  const src = audioContext.createBufferSource();
-  src.buffer = buffer;
-  src.connect(output);
-  src.start();
 }

@@ -3,6 +3,8 @@ author: ""
 clients:
   controller:
     runtime: browser
-    default: true
   device:
     runtime: node
+  teacher:
+    runtime: browser
+    default: true

@@ -2,6 +2,8 @@ import '@soundworks/helpers/polyfills.js';
 import { Client } from '@soundworks/core/client.js';
 import { loadConfig, launcher } from '@soundworks/helpers/node.js';
 
+
+
 import ComoClient from '@ircam/como/ComoClient.js';
 
 
@@ -16,9 +18,9 @@ async function bootstrap() {
 
   launcher.register(client);
 
+
   const como = new ComoClient(client);
   await como.start();
-
 
 
   const comote = await como.sourceManager.createSource({
@@ -53,7 +55,6 @@ async function bootstrap() {
     });
 
   const player = await como.playerManager.getPlayer(playerId);*/
-
 
 
   await player.state.set({

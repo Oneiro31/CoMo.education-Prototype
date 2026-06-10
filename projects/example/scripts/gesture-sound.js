@@ -20,6 +20,12 @@ export async function defineSharedState() {
       },
 
 
+      gestureName: {
+        type: 'string',
+        default: '',
+      },
+
+
       previewLabel: {
         type: 'string',
         default: null,
@@ -48,6 +54,28 @@ export async function defineSharedState() {
         type: 'string',
         default: null,
         nullable: true,
+      },
+
+
+      waitingGesture: {
+        type: 'any',
+        default: null,
+        nullable: true,
+      },
+
+      waitingPreview: {
+        type: 'boolean',
+        default: false,
+      },
+
+      validateWaitingRequest: {
+        type: 'integer',
+        default: 0,
+      },
+
+      cancelWaitingRequest: {
+        type: 'integer',
+        default: 0,
       },
 
 
@@ -102,18 +130,22 @@ export async function defineSharedState() {
 
 const MODEL_ID = 'gesture-sound_short';
 const MODEL_PRESET = 'shortGestures';
-
 const FRAME_TIMEOUT_MS = 500;
 const FRAME_TIMEOUT_INTERVAL_MS = 200;
+const WAITING_LABEL_PREFIX = '__waiting__:';
+
 
 let model = null;
 let synth = null;
 let recordExample = null;
+let recordingInfos = null;
 let unsubscribeState = null;
 let unsubscribeModel = null;
 let lastClearAllRequest = 0;
 let frameTimeoutInterval = null;
 let lastFrameTime = 0;
+let waitingExample = null;
+let waitingInfos = null;
 
 
 
@@ -142,9 +174,6 @@ class GestureSoundSynth {
     return Object.keys(this.soundbank);
   }
 
-  hasSound(label) {
-    return Boolean(label && this.soundbank[label]);
-  }
 
   // --- Fade In ---
   fadeIn(time = 0.2) {
@@ -259,6 +288,7 @@ class GestureSoundSynth {
     return channel;
   }
 
+
   // ---------- Loop Sound ---------
   loop(label, options = {}) {
     const {
@@ -368,7 +398,6 @@ export async function enter(context) {
     output,
   });
 
-
   lastFrameTime = performance.now();
 
   frameTimeoutInterval = setInterval(() => {
@@ -390,7 +419,8 @@ export async function enter(context) {
       state.set({
         recognizedLabel: null,
         status: 'source-timeout',
-        lastMessage: 'Pas de données IMU : son arrêté.',
+        lastMessage: 'Arret du son',
+        lastError: 'Pas de données IMU',
       });
     }
   }, FRAME_TIMEOUT_INTERVAL_MS);
@@ -402,12 +432,19 @@ export async function enter(context) {
   await state.set({
     labels,
     selectedLabel: labels.length > 0 ? labels[0] : null,
+    gestureName:'',
     previewLabel: null,
     record: false,
     mode: 'learn',
     training: false,
     recognizedLabel: null,
     examples: {},
+
+    waitingGesture: null,
+    waitingPreview: false,
+    validateWaitingRequest: 0,
+    cancelWaitingRequest: 0,
+
     status: 'loading-model',
     lastMessage: 'Chargement du modèle XMM...',
   });
@@ -416,7 +453,8 @@ export async function enter(context) {
     preset: MODEL_PRESET,
   });
 
-  syncExamplesToState(state);
+  await clearWaitingExamples();
+  await syncExamplesToState(state);
 
   unsubscribeModel = model.state.onUpdate(updates => {
     if ('infos' in updates || 'parameters' in updates) {
@@ -434,14 +472,14 @@ export async function enter(context) {
         if (label) {
           const channel = synth.preview(label, {
             onEnded: () => {
-              // Ne réinitialise que si ce son est toujours l'aperçu courant
+
               if (state.get('previewLabel') === label) {
                 void state.set({
                   previewLabel: null,
                   lastMessage: `Lecture terminée : "${label}"`,
                 }).catch(err => {
                   console.error(
-                    '[gesture-sound] erreur de fin de preview :',
+                    'erreur de fin de preview :',
                     err,
                   );
                 });
@@ -498,9 +536,11 @@ export async function enter(context) {
         if (updates.record === true) {
           await startRecording(state);
         } else {
-          await stopRecordingAndTrain(state);
+          await stopRecordingAndPreparePreview(state);
         }
       }
+
+
 
       if ('mode' in updates) {
         if (updates.mode !== 'play' && synth) {
@@ -518,6 +558,41 @@ export async function enter(context) {
             : 'Mode d’apprentissage activé',
         });
       }
+
+
+      if ('validateWaitingRequest' in updates && updates.validateWaitingRequest > 0) {
+        await validateWaitingGesture(state);
+      }
+
+      if ('cancelWaitingRequest' in updates && updates.cancelWaitingRequest > 0) {
+        await cancelWaitingGesture(state);
+      }
+
+      if ('waitingPreview' in updates) {
+        if (updates.waitingPreview === true) {
+          await state.set({
+            recognizedLabel: null,
+            status: 'previewing-waiting',
+            lastMessage:
+              'Test actif : refaites maintenant le geste enregistré.',
+            lastError: '',
+          });
+        } else {
+          synth?.stopAll({
+            fade: true,
+            fadeOutTime: 0.1,
+          });
+
+          await state.set({
+            recognizedLabel: null,
+            status: 'waiting-validation',
+            lastMessage:
+              'Test arrêté. Validez ou annulez le geste.',
+          });
+        }
+      }
+
+
 
       if ('deleteExampleUuid' in updates && updates.deleteExampleUuid) {
         await deleteExample(state, updates.deleteExampleUuid);
@@ -611,7 +686,14 @@ export async function process(context, frame) {
     return;
   }
 
-  if (state.get('mode') !== 'play') {
+  const isWaitingPreview =
+    state.get('waitingPreview') === true;
+  // En dehors du test temporaire, la reconnaissance normale
+  // fonctionne seulement en mode play.
+  if (
+    !isWaitingPreview
+    && state.get('mode') !== 'play'
+  ) {
     return;
   }
 
@@ -639,17 +721,129 @@ export async function process(context, frame) {
     return;
   }
 
+
+
+  // ------ Reconnaissance temporaire ---------
+  if (isWaitingPreview) {
+    if (!waitingInfos) {
+      synth?.stopAll({
+        fade: true,
+        fadeOutTime: 0.2,
+      });
+
+      return;
+    }
+
+    const temporaryLabel = waitingInfos.temporaryLabel;
+
+    let previewWinnerLabel = null;
+    let previewWinnerScore = -Infinity;
+
+    labels.forEach((label, index) => {
+      /*
+       * On accepte :
+       * - le geste temporaire actuel ;
+       * - tous les gestes déjà validés.
+       *
+       * On ignore uniquement d'éventuels anciens
+       * labels temporaires qui ne correspondent pas
+       * au geste en cours.
+       */
+      const isOtherWaitingLabel =
+        label.startsWith(WAITING_LABEL_PREFIX)
+        && label !== temporaryLabel;
+
+      if (isOtherWaitingLabel) {
+        return;
+      }
+
+      const score = Number(scores[index]);
+
+      if (
+        Number.isFinite(score)
+        && score > previewWinnerScore
+      ) {
+        previewWinnerLabel = label;
+        previewWinnerScore = score;
+      }
+    });
+
+    /*
+     * Le geste temporaire est reconnu uniquement
+     * s'il est le meilleur résultat produit par XMM.
+     */
+    const accepted =
+      previewWinnerLabel === temporaryLabel;
+
+    if (accepted) {
+      synth?.loop(waitingInfos.soundLabel, {
+        fadeInTime: 0.2,
+        fadeOutTime: 0.1,
+      });
+
+      if (
+        state.get('recognizedLabel')
+        !== waitingInfos.gestureName
+      ) {
+        state.set({
+          recognizedLabel:
+          waitingInfos.gestureName,
+
+          status: 'preview-recognized',
+
+          lastMessage:
+            `Geste reconnu : ${waitingInfos.gestureName}`,
+
+          lastError: '',
+        });
+      }
+    } else {
+      synth?.stopAll({
+        fade: true,
+        fadeOutTime: 0.2,
+      });
+
+      if (
+        state.get('recognizedLabel') !== null
+        || state.get('status')
+        !== 'preview-not-recognized'
+      ) {
+        state.set({
+          recognizedLabel: null,
+          status: 'preview-not-recognized',
+          lastMessage: 'Geste testé non reconnu.',
+          lastError: '',
+        });
+      }
+    }
+
+    return;
+  }
+
+
+
+  // ------ Reconnaissance normale ---------
   let winnerLabel = null;
   let winnerScore = -Infinity;
 
+
   labels.forEach((label, index) => {
+    // Ne jamais utiliser un geste temporaire en mode Jouer
+    if (label.startsWith(WAITING_LABEL_PREFIX)) {
+      return;
+    }
+
     const score = Number(scores[index]);
 
-    if (Number.isFinite(score) && score > winnerScore) {
+    if (
+      Number.isFinite(score)
+      && score > winnerScore
+    ) {
       winnerLabel = label;
       winnerScore = score;
     }
   });
+
 
   if (!winnerLabel) {
     synth?.stopAll({
@@ -657,35 +851,86 @@ export async function process(context, frame) {
       fadeOutTime: 0.3,
     });
 
+
+    if (state.get('recognizedLabel') !== null || state.get('status') !== 'playing') {
+      state.set({
+        recognizedLabel: null,
+        status: 'playing',
+        lastMessage: 'Aucun geste reconnu.',
+        lastError: '',
+      });
+    }
+
     return;
   }
+
 
   if (!synth) {
     return;
   }
 
-  synth.loop(winnerLabel, {
+
+  const {
+    gestureName,
+    soundLabel,
+  } = parseModelLabel(winnerLabel);
+
+
+  synth.loop(soundLabel, {
     fadeInTime: 0.2,
     fadeOutTime: 0.1,
   });
 
-  if (state.get('recognizedLabel') !== winnerLabel) {
+
+  if (state.get('recognizedLabel') !== gestureName) {
     state.set({
-      recognizedLabel: winnerLabel,
+      recognizedLabel: gestureName,
       status: 'recognized',
-      lastMessage: `Geste reconnu : ${winnerLabel}`,
+      lastMessage: `Geste reconnu : ${gestureName} — son : ${soundLabel}`,
       lastError: '',
     });
   }
 }
 
 
+
+const MODEL_LABEL_SEPARATOR = '|||';
+
+function createModelLabel(gestureName, soundLabel) {
+  return [
+    encodeURIComponent(gestureName.trim()),
+    encodeURIComponent(soundLabel),
+  ].join(MODEL_LABEL_SEPARATOR);
+}
+
+function parseModelLabel(modelLabel) {
+  const parts = modelLabel.split(MODEL_LABEL_SEPARATOR);
+
+  // Compatibilité avec les anciens exemples
+  if (parts.length !== 2) {
+    return {
+      gestureName: modelLabel,
+      soundLabel: modelLabel,
+    };
+  }
+
+  return {
+    gestureName: decodeURIComponent(parts[0]),
+    soundLabel: decodeURIComponent(parts[1]),
+  };
+}
+
+
+
+
 // ------- Start Recording --------
 async function startRecording(state) {
-  const label = state.get('selectedLabel');
+  const soundLabel = state.get('selectedLabel');
+  const gestureName= state.get('gestureName')?.trim();
 
-  if (!label) {
+  if (!soundLabel) {
     recordExample = null;
+    recordingInfos= null;
 
     await state.set({
       record: false,
@@ -696,33 +941,78 @@ async function startRecording(state) {
     return;
   }
 
+
+  if (!gestureName) {
+    recordExample = null;
+    recordingInfos = null;
+
+    await state.set({
+      record: false,
+      status: 'error',
+      lastError:
+        'Veuillez donner un nom au geste avant de commencer.',
+    });
+
+    return;
+  }
+
+  const modelLabel = createModelLabel(
+    gestureName,
+    soundLabel,
+  );
+
+  recordingInfos = {
+    gestureName,
+    soundLabel,
+    modelLabel,
+  };
+
   recordExample = [];
+
 
   await state.set({
     mode: 'learn',
     training: false,
     recognizedLabel: null,
     status: 'recording',
-    lastMessage: `Enregistrement du geste pour "${label}"...`,
+    lastMessage: `Enregistrement du geste "${gestureName}" pour le son "${soundLabel}"...`,
     lastError: '',
   });
 }
 
 
 // ------- Stop Recording and Train --------
-async function stopRecordingAndTrain(state) {
+async function stopRecordingAndPreparePreview(state) {
   if (!recordExample) {
     return;
   }
 
-  const label = state.get('selectedLabel');
   const example = recordExample;
   recordExample = null;
 
-  if (!label) {
+  const soundLabel = state.get('selectedLabel');
+
+  // Utilise le nom libre si tu as ajouté gestureName.
+  // Sinon, le nom du son sert temporairement de nom de geste.
+  const gestureName =
+    state.get('gestureName')?.trim()
+    || soundLabel;
+
+  if (!soundLabel) {
     await state.set({
       status: 'error',
-      lastError: 'Impossible de sauvegarder : aucun son sélectionné.',
+      lastError:
+        'Impossible de préparer le geste : aucun son sélectionné.',
+    });
+
+    return;
+  }
+
+  if (!gestureName) {
+    await state.set({
+      status: 'error',
+      lastError:
+        'Veuillez donner un nom au geste.',
     });
 
     return;
@@ -731,28 +1021,177 @@ async function stopRecordingAndTrain(state) {
   if (!isValidExample(example)) {
     await state.set({
       status: 'ready',
-      lastError: 'Exemple vide ou invalide. Recommence le geste.',
+      lastError:
+        'Exemple vide ou invalide. Recommencez le geste.',
     });
 
     return;
   }
 
+  const temporaryLabel =
+    `${WAITING_LABEL_PREFIX}${Date.now()}`;
+
+  const finalLabel = createModelLabel(
+    gestureName,
+    soundLabel,
+  );
+
+  waitingExample = example;
+
+  waitingInfos = {
+    temporaryLabel,
+    finalLabel,
+    gestureName,
+    soundLabel,
+  };
+
   await state.set({
     training: true,
-    status: 'training',
-    lastMessage: `Entraînement XMM pour "${label}" (${example.length} frames)...`,
+    status: 'preparing-preview',
+    lastMessage:
+      `Préparation du test du geste "${gestureName}"...`,
     lastError: '',
   });
 
-  await model.addExample(label, example);
-  syncExamplesToState(state);
+
+  // Ajout temporaire dans XMM
+  await model.addExample(
+    temporaryLabel,
+    example,
+  );
 
   await state.set({
+    waitingGesture: {
+      gestureName,
+      soundLabel,
+    },
+
+    waitingPreview: false,
     training: false,
-    status: 'ready',
-    lastMessage: `Geste ajouté pour "${label}".`,
+    status: 'waiting-validation',
+
+    lastMessage:
+      `Le geste "${gestureName}" est prêt à être testé.`,
   });
 }
+
+
+
+// ------- Validate Waiting Gesture --------
+async function validateWaitingGesture(state) {
+  if (!waitingExample || !waitingInfos) {
+    await state.set({
+      lastError:
+        'Aucun geste temporaire à valider.',
+    });
+
+    return;
+  }
+
+  const {
+    temporaryLabel,
+    finalLabel,
+    gestureName,
+    soundLabel,
+  } = waitingInfos;
+
+  synth?.stopAll({
+    fade: true,
+    fadeOutTime: 0.1,
+  });
+
+  await state.set({
+    waitingPreview: false,
+    training: true,
+    status: 'validating-gesture',
+    lastMessage:
+      `Validation du geste "${gestureName}"...`,
+    lastError: '',
+  });
+
+
+  // Ajout définitif
+  await model.addExample(
+    finalLabel,
+    waitingExample,
+  );
+
+  // Suppression de la classe temporaire
+  await model.clearExamples(temporaryLabel);
+
+  waitingExample = null;
+  waitingInfos = null;
+
+  await syncExamplesToState(state);
+
+  await state.set({
+    waitingGesture: null,
+    waitingPreview: false,
+    validateWaitingRequest: 0,
+
+    gestureName: '',
+    training: false,
+    status: 'ready',
+
+    lastMessage:
+      `Geste "${gestureName}" associé au son "${soundLabel}".`,
+  });
+}
+
+
+// ------- Cancel Waiting Gesture --------
+async function cancelWaitingGesture(state) {
+  synth?.stopAll({
+    fade: true,
+    fadeOutTime: 0.1,
+  });
+
+  if (waitingInfos?.temporaryLabel) {
+    await model.clearExamples(
+      waitingInfos.temporaryLabel,
+    );
+  }
+
+  const gestureName = waitingInfos?.gestureName || 'le geste';
+
+  waitingExample = null;
+  waitingInfos = null;
+
+  await syncExamplesToState(state);
+
+  await state.set({
+    waitingGesture: null,
+    waitingPreview: false,
+    cancelWaitingRequest: 0,
+
+    training: false,
+    recognizedLabel: null,
+    status: 'ready',
+
+    lastMessage:
+      `Enregistrement de "${gestureName}" annulé.`,
+    lastError: '',
+  });
+}
+
+
+
+async function clearWaitingExamples() {
+  if (!model) {
+    return;
+  }
+
+  const infos = model.state.get('infos') || {};
+  const labels = Object.keys(infos);
+
+  for (const label of labels) {
+    if (label.startsWith(WAITING_LABEL_PREFIX)) {
+      await model.clearExamples(label);
+    }
+  }
+}
+
+
 
 
 // ------- Delete Example --------
@@ -765,7 +1204,7 @@ async function deleteExample(state, uuid) {
   });
 
   await model.deleteExample(uuid);
-  syncExamplesToState(state);
+  await syncExamplesToState(state);
 
   await state.set({
     deleteExampleUuid: null,
@@ -785,7 +1224,7 @@ async function clearExamplesForLabel(state, label) {
   });
 
   await model.clearExamples(label);
-  syncExamplesToState(state);
+  await syncExamplesToState(state);
 
   await state.set({
     clearLabel: null,
@@ -794,6 +1233,8 @@ async function clearExamplesForLabel(state, label) {
     lastMessage: `Tous les gestes pour "${label}" ont été supprimés.`,
   });
 }
+
+
 
 // ------ Clear all Examples ------
 async function clearAllExamples(state) {
@@ -804,7 +1245,7 @@ async function clearAllExamples(state) {
   });
 
   await model.clearExamples();
-  syncExamplesToState(state);
+  await syncExamplesToState(state);
 
   await state.set({
     training: false,
@@ -816,15 +1257,41 @@ async function clearAllExamples(state) {
 
 
 // ------ Sync Examples from Model State to Shared State -----
-function syncExamplesToState(state) {
+async function syncExamplesToState(state) {
   if (!model) {
     return;
   }
 
-  const infos = model.state.get('infos') || {};
+  const infos =
+    model.state.get('infos') || {};
 
-  state.set({
-    examples: infos,
+  const examples = {};
+
+  for (const [modelLabel, modelInfos] of Object.entries(infos)) {
+
+    // Les labels temporaires ne sont pas affichés
+    if (
+      modelLabel.startsWith(
+        WAITING_LABEL_PREFIX,
+      )
+    ) {
+      continue;
+    }
+
+    const {
+      gestureName,
+      soundLabel,
+    } = parseModelLabel(modelLabel);
+
+    examples[modelLabel] = {
+      ...modelInfos,
+      gestureName,
+      soundLabel,
+    };
+  }
+
+  await state.set({
+    examples,
   });
 }
 

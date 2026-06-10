@@ -136,6 +136,7 @@ async function main($container) {
 
   await attachToGestureSoundScript();
 
+
   function setSelectedLabel(label) {
     scriptState?.set({
       selectedLabel: label || null,
@@ -144,6 +145,14 @@ async function main($container) {
   }
 
 
+  function setGestureName(value) {
+    scriptState?.set({
+      gestureName: value,
+    });
+  }
+
+
+  // Listen preview sound
   function togglePreviewSound(label) {
     if (!scriptState || !label) {
       return;
@@ -152,17 +161,18 @@ async function main($container) {
     const currentPreviewLabel = scriptState.get('previewLabel');
 
     if (currentPreviewLabel === label) {
-      // Le son correspondant joue déjà : on l'arrête
+      // The sound is already playing: we stop it
       scriptState.set({
         previewLabel: null,
       });
     } else {
-      // On lance ce son. gesture-sound.js arrêtera le précédent.
+      // We play this sound
       scriptState.set({
         previewLabel: label,
       });
     }
   }
+
 
   function toggleRecord() {
     if (!scriptState) {
@@ -171,13 +181,16 @@ async function main($container) {
     scriptState.set({ record: !scriptState.get('record') });
   }
 
+
   function setMode(mode) {
     scriptState?.set({ mode, recognizedLabel: null });
   }
 
+
   function deleteExample(uuid) {
     scriptState?.set({ deleteExampleUuid: uuid });
   }
+
 
   function clearAllExamples() {
     scriptState?.set({ clearAllRequest: Date.now() });
@@ -188,6 +201,31 @@ async function main($container) {
     playersExpanded = !playersExpanded;
     renderApp();
   }
+
+
+  function toggleWaitingPreview() {
+    if (!scriptState) {
+      return;
+    }
+
+    scriptState.set({
+      waitingPreview:
+        !scriptState.get('waitingPreview'),
+    });
+  }
+
+  function validateWaitingGesture() {
+    scriptState?.set({
+      validateWaitingRequest: Date.now(),
+    });
+  }
+
+  function cancelWaitingGesture() {
+    scriptState?.set({
+      cancelWaitingRequest: Date.now(),
+    });
+  }
+
 
 
   function renderCustomApp() {
@@ -214,17 +252,23 @@ async function main($container) {
     const sources = Array.from(como.sourceManager.sources);
     const playerCount = Array.from(como.playerManager.players).length;
     const previewLabel = scriptState.get('previewLabel');
+    const gestureName = scriptState.get('gestureName') || '';
+
+    const waitingGesture = scriptState.get('waitingGesture');
+    const waitingPreview = scriptState.get('waitingPreview');
 
 
     const gestureRows = Object.entries(examples).flatMap(
-      ([label, infos]) => {
+      ([modelLabel, infos]) => {
         const uuids = Array.isArray(infos?.uuids)
           ? infos.uuids
           : [];
 
         return uuids.map(uuid => ({
           uuid,
-          label,
+          modelLabel,
+          gestureName: infos?.gestureName || modelLabel,
+          soundLabel: infos?.soundLabel || modelLabel,
         }));
       },
     );
@@ -232,6 +276,7 @@ async function main($container) {
 
 
     return html`
+
       <!---- Title ---->
       <section class="app-panel">
         <h1 class = "center">
@@ -253,6 +298,7 @@ async function main($container) {
             ${playersExpanded ? '−' : '+'}
           </span>
         </button>
+
 
         ${playersExpanded ? html`
           <!----- Source ----->
@@ -300,8 +346,8 @@ async function main($container) {
 
         <!---------- Modes Button ------------->
         <div class="mode-row">
-          <!---- Creation Mode Button ---->
 
+          <!---- Creation Mode Button ---->
           <button
             class="mode-button learn-button ${mode=== 'learn' ? 'active-mode' : ''}"
             @click=${() => setMode('learn')}
@@ -314,14 +360,48 @@ async function main($container) {
           <button
             class="mode-button play-button ${mode === 'play' ? 'active-mode' : ''}"
             @click=${() => setMode('play')}
-            ?disabled=${record || training}
+            ?disabled=${record || training || waitingGesture}
           >
             Jouer
           </button>
         </div>
 
 
-        <!---- Console ---->
+        <!---------- Master Parameters --------->
+        ${gesturePlayerState ? html`
+          <div class="master-controls">
+
+            <!------ Volume Slider ------->
+            <div class="volume-control">
+              <strong class="volume-control">
+                Volume
+              </strong>
+
+              <sc-slider
+                number-box
+                min=${gesturePlayerState.getDescription('volume').min}
+                max=${gesturePlayerState.getDescription('volume').max}
+                value=${gesturePlayerState.get('volume')}
+                @input=${e => gesturePlayerState.set('volume', e.detail.value)}
+              ></sc-slider>
+            </div>
+
+
+            <!------- Mute ------->
+            <div class="mute-control">
+              <button
+                class="mute-button ${gesturePlayerState.get('mute') ? 'active-mute' : ''}"
+                @click=${() => gesturePlayerState.set('mute', !gesturePlayerState.get('mute'))}
+              >
+                ${gesturePlayerState.get('mute') ? 'Unmute' : 'Mute'}
+              </button>
+            </div>
+          </div>
+        ` : nothing}
+
+
+
+        <!---------- Console ------------>
         <div class="message-box">
           <p>
             <strong>
@@ -338,46 +418,11 @@ async function main($container) {
         </div>
 
 
-        <!---- Master Parameters ---->
-        ${gesturePlayerState ? html`
-          <div class="master-controls">
-
-            <!---- Volume Slider ---->
-            <div class="volume-control">
-              <strong class="volume-control">
-                Volume
-              </strong>
-
-              <sc-slider
-                number-box
-                min=${gesturePlayerState.getDescription('volume').min}
-                max=${gesturePlayerState.getDescription('volume').max}
-                value=${gesturePlayerState.get('volume')}
-                @input=${e => gesturePlayerState.set('volume', e.detail.value)}
-              ></sc-slider>
-            </div>
-
-
-            <!---- Mute ---->
-            <div class="mute-control">
-              <button
-                class="mute-button ${gesturePlayerState.get('mute') ? 'active-mute' : ''}"
-                @click=${() => gesturePlayerState.set('mute', !gesturePlayerState.get('mute'))}
-              >
-                ${gesturePlayerState.get('mute') ? 'Unmute' : 'Mute'}
-              </button>
-            </div>
-          </div>
-        ` : nothing}
-
-
-
 
         <!-------------  Left Column ------------->
         <div class="app-grid">
           <div class="scroller">
             <section class="sub-panel left-column">
-
 
               <h2 class="center">
                 Sons disponibles
@@ -434,7 +479,9 @@ async function main($container) {
               <h2 class="center">
                 Enregistrer un nouveau geste
               </h2>
+
               <br>
+
               <h3>
                 Son sélectionné :
                 <strong>
@@ -442,11 +489,34 @@ async function main($container) {
                 </strong>
               </h3>
 
+
+              <!-------  Gesture Name  ----->
+              <div class="gesture-name-control">
+                <label for="gesture-name">
+                  Nom du geste :
+                </label>
+
+                <input
+                  id="gesture-name"
+                  class="gesture-name-input"
+                  type="text"
+                  placeholder="Donnez un nom au geste..."
+                  .value=${gestureName}
+                  @input=${event => {
+                    setGestureName(event.target.value);
+                  }}
+                  ?disabled=${record || training || mode !== 'learn'}
+                >
+              </div>
+
+
+
+
               <!----  Record Gesture Button -->
               <button
                 class=${record ? 'recording' : 'record'}
                 @click=${toggleRecord}
-                ?disabled=${!selectedLabel || training || mode !== 'learn'}
+                ?disabled=${!selectedLabel || !gestureName.trim () ||training || waitingGesture || mode !== 'learn'}
               >
                 ${record ? 'Arreter' : 'Enregistrer'}
               </button>
@@ -457,6 +527,36 @@ async function main($container) {
                   Repassez en mode apprentissage pour enregistrer de nouveaux gestes.
                 </p>
               ` : nothing}
+
+
+
+
+
+              <button
+                class="preview-gesture-button ${waitingPreview ? 'active-preview' : ''}"
+                @click=${toggleWaitingPreview}
+                ?disabled=${!waitingGesture || training}
+              >
+                ${waitingPreview
+                  ? 'Arrêter le test'
+                  : 'Tester le geste'}
+              </button>
+
+              <button
+                class="validate-gesture-button"
+                @click=${validateWaitingGesture}
+                ?disabled=${!waitingGesture || training}
+              >
+                Valider
+              </button>
+
+              <button
+                class="delete-waiting-gesture"
+                @click=${cancelWaitingGesture}
+                ?disabled=${!waitingGesture || training}
+              >
+                Annuler
+              </button>
             </section>
 
 
@@ -486,12 +586,11 @@ async function main($container) {
 
 
 
-
                 <div class="examples-list">
-                  ${gestureRows.map(({ uuid, label }, index) => html`
+                  ${gestureRows.map(({ uuid, gestureName, soundLabel }, index) => html`
                     <div class="example-row">
                         <span>
-                            Geste n°${index + 1} | ${label}
+                            Geste n°${index + 1}: ${gestureName} | Son : ${soundLabel}
                         </span>
 
                         <button
@@ -539,6 +638,7 @@ async function main($container) {
           --white-border: rgba(255, 255, 255, 1);
 
           --cyan-bg: rgba(51, 204, 204, 0.8);
+          --blue: rgba(0, 153, 255, 1);
         }
 
 
@@ -855,12 +955,8 @@ async function main($container) {
         }
 
         button.listen-button.active-mode {
-          background: var(--gray);
-          border-color: var(--white-border);
-        }
-
-        button.listen-button.active-mode:hover {
           background: var(--red-bg);
+          border-color: var(--white-border);
         }
 
 
@@ -889,18 +985,18 @@ async function main($container) {
 
         /* ----------- Record Button ---------- */
         button.record {
-          min-width: 200px;
+          min-width: 120px;
           min-height: 40px;
           font-size: 1.20rem;
           font-weight: 700;
-          border-color: var(--white-border);
+          border-color: var(--green-border);
           background: var(--gray-bg);
         }
 
         button.recording {
           background: var(--red-bg);
           border-color: var(--white-border);
-          min-width: 200px;
+          min-width: 120px;
           min-height: 40px;
           font-size: 1.20rem;
           font-weight: 700;
@@ -938,10 +1034,93 @@ async function main($container) {
 
         /* ------ Disabled Button ------ */
         button:disabled {
-          opacity: 0.4;
+          opacity: 0.5;
           cursor: not-allowed;
         }
 
+
+
+
+        /* ------------ Gesture Name ------------- */
+        .gesture-name-control {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          margin: 18px 0;
+        }
+
+        .gesture-name-control label {
+          font-size: 1.2rem;
+          font-weight: 700;
+        }
+
+        .gesture-name-input {
+          width:50%;
+          box-sizing: border-box;
+          padding: 10px 12px;
+          border: 1px solid var(--white-border);
+          border-radius: 6px;
+          background: var(--gray-bg);
+          color: inherit;
+          font: inherit;
+          min-width: 200px;
+          min-height: 40px;
+          font-size: 1.2rem;
+        }
+
+        .gesture-name-input:focus {
+          outline: none;
+          border-color: var(--blue);
+        }
+
+        .gesture-name-input:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+
+
+        /* ------------ Preview Gesture  ------------- */
+        button.preview-gesture-button {
+          min-width: 120px;
+          min-height: 40px;
+          border-color: var(--orange);
+          background: var(--gray-bg);
+          font-size: 1.20rem;
+        }
+
+
+        button.preview-gesture-button:hover,
+        button.preview-gesture-button.active-preview {
+          background: var(--orange-bg);
+          border-color: var(--white-border);
+        }
+
+
+        button.validate-gesture-button {
+          min-width: 120px;
+          min-height: 40px;
+          border-color: var(--blue);
+          font-size: 1.20rem;
+        }
+
+        button.validate-gesture-button:hover {
+          background: var(--blue);
+          border-color: var(--white-border);
+        }
+
+        button.delete-waiting-gesture {
+          min-width: 120px;
+          min-height: 40px;
+          border-color: var(--red-border);
+          background: var(--gray-bg);
+          font-size: 1.20rem;
+        }
+
+
+        button.delete-waiting-gesture:hover {
+          border-color: var(--white-border);
+          background: var(--red-bg);
+        }
 
       </style>
 

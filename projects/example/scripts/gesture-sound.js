@@ -8,9 +8,20 @@ const {
 export async function defineSharedState() {
   return {
     classDescription: {
+
       labels: {
         type: 'any',
         default: [],
+      },
+
+      userSoundFiles: {
+        type: 'any',
+        default: [],
+      },
+
+      reloadUserSoundsRequest: {
+        type: 'integer',
+        default: 0,
       },
 
       selectedLabel: {
@@ -135,10 +146,11 @@ const FRAME_TIMEOUT_INTERVAL_MS = 200;
 const WAITING_LABEL_PREFIX = '__waiting__:';
 
 
+
 let model = null;
 let synth = null;
 let recordExample = null;
-let recordingInfos = null;
+
 let unsubscribeState = null;
 let unsubscribeModel = null;
 let lastClearAllRequest = 0;
@@ -146,6 +158,7 @@ let frameTimeoutInterval = null;
 let lastFrameTime = 0;
 let waitingExample = null;
 let waitingInfos = null;
+let recordingInfos = null;
 
 
 
@@ -153,7 +166,10 @@ let waitingInfos = null;
 class GestureSoundSynth {
   constructor({ audioContext, soundbank, output }) {
     this.audioContext = audioContext;
-    this.soundbank = soundbank;
+
+    this.soundbank = {
+      ...soundbank,
+    };
 
     // CoMo output
     this.output = output;
@@ -172,6 +188,21 @@ class GestureSoundSynth {
 
   get labels() {
     return Object.keys(this.soundbank);
+  }
+
+
+  hasSound(label) {
+    return Boolean(label && this.soundbank[label]);
+  }
+
+
+  addSound(label, audioBuffer) {
+    if (!label || !audioBuffer) {
+      return false;
+    }
+
+    this.soundbank[label] = audioBuffer;
+    return true;
   }
 
 
@@ -431,6 +462,9 @@ export async function enter(context) {
 
   await state.set({
     labels,
+    userSoundFiles: [],
+    reloadUserSoundsRequest: 0,
+
     selectedLabel: labels.length > 0 ? labels[0] : null,
     gestureName:'',
     previewLabel: null,
@@ -466,6 +500,16 @@ export async function enter(context) {
 
   unsubscribeState = state.onUpdate(async updates => {
     try {
+
+      if (
+        'userSoundFiles' in updates
+        || 'reloadUserSoundsRequest'
+        in updates
+      ) {
+        await loadUserSounds(state);
+      }
+
+
       if ('previewLabel' in updates) {
         const label = updates.previewLabel;
 
@@ -1193,7 +1237,6 @@ async function clearWaitingExamples() {
 
 
 
-
 // ------- Delete Example --------
 async function deleteExample(state, uuid) {
   await state.set({
@@ -1316,5 +1359,121 @@ function isValidExample(example) {
     return Array.isArray(frame)
       && frame.length === dimension
       && frame.every(value => Number.isFinite(value));
+  });
+}
+
+
+
+async function loadUserSounds(state) {
+  if (!synth) {
+    return;
+  }
+
+  const userSoundFiles =
+    state.get('userSoundFiles')
+    || [];
+
+  if (
+    !Array.isArray(userSoundFiles)
+  ) {
+    return;
+  }
+
+  let loadedCount = 0;
+  const errors = [];
+
+  for (const soundFile of userSoundFiles) {
+    const label = String(
+      soundFile?.label || '',
+    ).trim();
+
+    const url =
+      soundFile?.url;
+
+    if (!label || !url) {
+      continue;
+    }
+
+    /*
+     * Les noms sont rendus uniques
+     * au moment de l’upload.
+     */
+    if (synth.hasSound(label)) {
+      continue;
+    }
+
+    try {
+      const response =
+        await fetch(url);
+
+      if (!response.ok) {
+        throw new Error(
+          `HTTP ${response.status}`,
+        );
+      }
+
+      const arrayBuffer =
+        await response.arrayBuffer();
+
+      const audioBuffer =
+        await audioContext
+          .decodeAudioData(
+            arrayBuffer.slice(0),
+          );
+
+      synth.addSound(
+        label,
+        audioBuffer,
+      );
+
+      loadedCount += 1;
+    } catch (error) {
+      console.error(
+        `Impossible de charger "${label}" :`,
+        error,
+      );
+
+      errors.push(label);
+    }
+  }
+
+  const nextLabels =
+    synth.labels.sort(
+      (a, b) =>
+        a.localeCompare(b),
+    );
+
+  const currentSelectedLabel =
+    state.get('selectedLabel');
+
+  const nextSelectedLabel =
+    currentSelectedLabel
+    && nextLabels.includes(
+      currentSelectedLabel,
+    )
+      ? currentSelectedLabel
+      : nextLabels[0] || null;
+
+
+  await state.set({
+    labels: nextLabels,
+
+    selectedLabel:
+    nextSelectedLabel,
+
+    status:
+      errors.length > 0
+        ? 'sound-loading-error'
+        : 'ready',
+
+    lastMessage:
+      loadedCount > 0
+        ? `${loadedCount} nouveau(x) son(s) chargé(s).`
+        : state.get('lastMessage'),
+
+    lastError:
+      errors.length > 0
+        ? `Impossible de charger : ${errors.join(', ')}`
+        : '',
   });
 }

@@ -3,7 +3,6 @@ import { Client } from '@soundworks/core/client.js';
 import { loadConfig, launcher } from '@soundworks/helpers/node.js';
 
 
-
 import ComoClient from '@ircam/como/ComoClient.js';
 
 
@@ -23,7 +22,7 @@ async function bootstrap() {
   await como.start();
 
 
-  const comote = await como.sourceManager.createSource({
+ /* const comote = await como.sourceManager.createSource({
     type: 'comote',
     id: '0',
     port: OSC_PORT,
@@ -37,10 +36,10 @@ async function bootstrap() {
       id: APP_PLAYER_ID,
     });
 
-  const player = await como.playerManager.getPlayer(playerId);
+  const player = await como.playerManager.getPlayer(playerId);*/
 
 
-  /*const lsm9ds1 = await como.sourceManager.createSource({
+  const lsm9ds1 = await como.sourceManager.createSource({
     type: 'lsm9ds1',
     id: '1',
     interval: 10,
@@ -54,7 +53,8 @@ async function bootstrap() {
       id: APP_PLAYER_ID,
     });
 
-  const player = await como.playerManager.getPlayer(playerId);*/
+  const player = await como.playerManager.getPlayer(playerId);
+
 
 
   await player.state.set({

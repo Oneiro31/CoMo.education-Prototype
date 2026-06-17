@@ -36,7 +36,6 @@
     "eslint": "^9.18.0",
     "sass": "^1.77.1"
   },
-
   "overrides": {
     "node-web-audio-api": "1.0.9"
   }

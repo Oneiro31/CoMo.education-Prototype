@@ -12,10 +12,29 @@ import '@ircam/sc-components/sc-text.js';
 import '@ircam/sc-components/sc-toggle.js';
 import '@ircam/sc-components/sc-slider.js';
 import '@ircam/sc-components/sc-status.js';
+import '@ircam/sc-components/sc-dragndrop.js';
+
 
 
 const APP_PLAYER_ID = 'gesture-player';
 const APP_SCRIPT_NAME = 'gesture-sound.js';
+
+const AUDIO_FILE_EXTENSION =
+  /\.(wav|mp3|ogg|m4a|aac|flac|aif|aiff)$/i;
+
+
+function isAudioFile(file) {
+  if (!(file instanceof File)) {
+    return false;
+  }
+
+  return (
+    file.type.startsWith('audio/')
+    || AUDIO_FILE_EXTENSION.test(
+      file.name,
+    )
+  );
+}
 
 
 async function main($container) {
@@ -30,15 +49,31 @@ async function main($container) {
   const como = new ComoClient(client);
   await como.start();
 
-  const controller = await como.stateManager.create('controller', {
-    showEditScriptPanel: false,
-  });
+  const controller = await como.stateManager.create('controller', { showEditScriptPanel: false });
+  const userSoundbankFilesystem = await client.pluginManager.get('soundbankManager:filesystem');
+
 
   let scriptState = null;
   let attachedScriptStateId = null;
   let unsubscribeScriptState = null;
   let playersExpanded = false;
   let gesturePlayerState = null;
+
+
+  userSoundbankFilesystem.onUpdate(
+    () => {
+      void syncUserSoundbankToScript()
+        .catch(error => {
+          console.error(
+            'Erreur de synchronisation de la soundbank :',
+            error,
+          );
+        });
+
+      renderApp();
+    },
+    true,
+  );
 
 
   const sourceUnsubscribers = new Map();
@@ -76,6 +111,7 @@ async function main($container) {
 
 
 
+
   async function attachToGestureSoundScript() {
     const nextPlayerState = como.playerManager.players.find(player => {
       return player.get('id') === APP_PLAYER_ID
@@ -109,6 +145,9 @@ async function main($container) {
     unsubscribeScriptState = scriptState.onUpdate(renderApp, true);
 
     renderApp();
+
+    await syncUserSoundbankToScript();
+
   }
 
   function detachScriptState() {
@@ -225,6 +264,215 @@ async function main($container) {
       cancelWaitingRequest: Date.now(),
     });
   }
+
+
+  function getExistingAudioFilenames() {
+    const urlMap = userSoundbankFilesystem.getTreeAsUrlMap(
+      undefined,
+      true,
+    );
+
+    return new Set(
+      Object.keys(urlMap).map(pathname => {
+        return pathname.split('/').pop();
+      }),
+    );
+  }
+
+
+  function createUniqueAudioFilename(originalFilename) {
+    const existingFilenames =
+      getExistingAudioFilenames();
+
+    const labels =
+      scriptState?.get('labels') || [];
+
+    for (const label of labels) {
+      existingFilenames.add(label);
+    }
+
+    if (!existingFilenames.has(originalFilename)) {
+      return originalFilename;
+    }
+
+    const dotIndex =
+      originalFilename.lastIndexOf('.');
+
+    const hasExtension = dotIndex > 0;
+
+    const basename = hasExtension
+      ? originalFilename.slice(0, dotIndex)
+      : originalFilename;
+
+    const extension = hasExtension
+      ? originalFilename.slice(dotIndex)
+      : '';
+
+    let index = 2;
+    let candidate =
+      `${basename}-${index}${extension}`;
+
+    while (existingFilenames.has(candidate)) {
+      index += 1;
+      candidate =
+        `${basename}-${index}${extension}`;
+    }
+
+    return candidate;
+  }
+
+
+  async function syncUserSoundbankToScript() {
+    if (
+      !scriptState
+      || !userSoundbankFilesystem
+    ) {
+      return;
+    }
+
+    const urlMap = userSoundbankFilesystem.getTreeAsUrlMap(undefined, true,);
+
+    const userSoundFiles =
+      Object.entries(urlMap)
+        .filter(([pathname]) => {
+          return AUDIO_FILE_EXTENSION.test(
+            pathname,
+          );
+        })
+        .map(([pathname, url]) => {
+          const label = pathname
+            .split('/')
+            .pop();
+
+          /*
+           * Le player tourne éventuellement
+           * sur la Raspberry Pi.
+           *
+           * Il lui faut donc une URL absolue,
+           * et non une URL relative au navigateur.
+           */
+          const absoluteUrl = new URL(url, window.location.origin).href;
+          return {
+            label,
+            url: absoluteUrl,
+          };
+
+        });
+
+    await scriptState.set({
+      userSoundFiles,
+
+      /*
+       * Garantit que le player reçoit
+       * une nouvelle demande, même si la liste
+       * de fichiers semble identique.
+       */
+      reloadUserSoundsRequest:
+        Date.now(),
+    });
+  }
+
+
+
+
+
+  async function handleAudioDrop(event) {
+    if (!scriptState) {
+      return;
+    }
+
+    const record =
+      scriptState.get('record');
+
+    const training =
+      scriptState.get('training');
+
+    const waitingGesture =
+      scriptState.get('waitingGesture');
+
+    if (
+      record
+      || training
+      || waitingGesture
+    ) {
+      await scriptState.set({
+        lastError:
+          'Terminez l’enregistrement en cours avant d’importer un son.',
+      });
+
+      return;
+    }
+
+    const droppedFiles =
+      Object.values(
+        event.detail?.value || {},
+      );
+
+    const audioFiles =
+      droppedFiles.filter(isAudioFile);
+
+    if (audioFiles.length === 0) {
+      await scriptState.set({
+        lastError:
+          'Aucun fichier audio valide n’a été déposé.',
+      });
+
+      return;
+    }
+
+    try {
+      await scriptState.set({
+        status: 'uploading-sounds',
+        lastMessage:
+          `Import de ${audioFiles.length} son(s)...`,
+        lastError: '',
+      });
+
+      const importedFilenames = [];
+
+      for (const file of audioFiles) {
+        const filename =
+          createUniqueAudioFilename(
+            file.name,
+          );
+
+        await userSoundbankFilesystem.writeFile(
+          filename,
+          file,
+        );
+
+        importedFilenames.push(filename);
+      }
+
+
+      await syncUserSoundbankToScript();
+
+
+      await scriptState.set({
+        status: 'ready',
+        lastMessage:
+          `${importedFilenames.length} son(s) importé(s) : `
+          + importedFilenames.join(', '),
+        lastError: '',
+      });
+    } catch (error) {
+      console.error(
+        'Erreur d’import audio :',
+        error,
+      );
+
+      await scriptState.set({
+        status: 'error',
+        lastError:
+          `Impossible d’importer les sons : ${
+            error?.message || String(error)
+          }`,
+      });
+    }
+  }
+
+
+
 
 
 
@@ -424,13 +672,32 @@ async function main($container) {
           <div class="scroller">
             <section class="sub-panel left-column">
 
+
+              <sc-dragndrop
+                format="raw"
+                class="sound-dragndrop ${record || training || waitingGesture ? 'disabled' : ''}"
+                @change=${handleAudioDrop}
+              >
+
+                <div class="sound-drop-content">
+                  <strong>
+                    Importer des sons
+                  </strong>
+
+                  <span>
+                    Glissez-déposez ici vos fichiers
+                    WAV, MP3, OGG, M4A ou FLAC
+                  </span>
+                </div>
+              </sc-dragndrop>
+
+
               <h2 class="center">
                 Sons disponibles
               </h2>
 
-              <br>
-              ${labels.length === 0 ? html`
 
+              ${labels.length === 0 ? html`
                 <p>
                   Aucun son trouvé dans la soundbank.
                 </p>
@@ -530,8 +797,6 @@ async function main($container) {
 
 
 
-
-
               <button
                 class="preview-gesture-button ${waitingPreview ? 'active-preview' : ''}"
                 @click=${toggleWaitingPreview}
@@ -585,7 +850,7 @@ async function main($container) {
                 <br>
 
 
-
+                <!---- Examples List  -->
                 <div class="examples-list">
                   ${gestureRows.map(({ uuid, gestureName, soundLabel }, index) => html`
                     <div class="example-row">
@@ -593,6 +858,7 @@ async function main($container) {
                             Geste n°${index + 1}: ${gestureName} | Son : ${soundLabel}
                         </span>
 
+                      <!-------- Delete Example Button ------>
                         <button
                             class="delete-examples"
                             @click=${() => deleteExample(uuid)}
@@ -1121,6 +1387,53 @@ async function main($container) {
           border-color: var(--white-border);
           background: var(--red-bg);
         }
+
+
+
+
+
+        sc-dragndrop.sound-dragndrop {
+          display: block;
+          width: 100%;
+          max-width: 620px;
+          height: 120px;
+          margin: 16px auto 24px;
+
+          --sc-dragndrop-dragged-background-color:
+            var(--blue);
+
+          --sc-dragndrop-processing-background-color:
+            var(--orange-bg);
+        }
+
+        sc-dragndrop.sound-dragndrop.disabled {
+          opacity: 0.45;
+          pointer-events: none;
+          cursor: not-allowed;
+        }
+
+        .sound-drop-content {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+
+          width: 100%;
+          height: 100%;
+
+          text-align: center;
+        }
+
+        .sound-drop-content strong {
+          font-size: 1.2rem;
+        }
+
+
+        .sound-drop-content span {
+          opacity: 0.75;
+        }
+
 
       </style>
 

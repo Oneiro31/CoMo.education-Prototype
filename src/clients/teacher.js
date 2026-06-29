@@ -15,12 +15,10 @@ import '@ircam/sc-components/sc-status.js';
 import '@ircam/sc-components/sc-dragndrop.js';
 
 
-
 const APP_PLAYER_ID = 'gesture-player';
 const APP_SCRIPT_NAME = 'gesture-sound.js';
 
-const AUDIO_FILE_EXTENSION =
-  /\.(wav|mp3|ogg|m4a|aac|flac|aif|aiff)$/i;
+const AUDIO_FILE_EXTENSION = /\.(wav|mp3|ogg|m4a|aac|flac|aif|aiff)$/i;
 
 
 function isAudioFile(file) {
@@ -61,13 +59,15 @@ async function main($container) {
 
 
   userSoundbankFilesystem.onUpdate(
-    () => {
-      void syncUserSoundbankToScript()
+    (tree, events) => {
+      console.log('[Filesystem] Arbre actualisé :', events);
+
+
+      // On utilise directement le nouvel arbre
+      // transmis par le plugin.
+      void syncUserSoundbankToScript(tree)
         .catch(error => {
-          console.error(
-            'Erreur de synchronisation de la soundbank :',
-            error,
-          );
+          console.error('Erreur de synchronisation de la soundbank :', error);
         });
 
       renderApp();
@@ -108,8 +108,6 @@ async function main($container) {
   });
 
   subscribeToSources();
-
-
 
 
   async function attachToGestureSoundScript() {
@@ -267,25 +265,18 @@ async function main($container) {
 
 
   function getExistingAudioFilenames() {
-    const urlMap = userSoundbankFilesystem.getTreeAsUrlMap(
-      undefined,
-      true,
-    );
-
     return new Set(
-      Object.keys(urlMap).map(pathname => {
-        return pathname.split('/').pop();
+      getAudioFilesystemEntries().map(entry => {
+        return entry.label;
       }),
     );
   }
 
 
   function createUniqueAudioFilename(originalFilename) {
-    const existingFilenames =
-      getExistingAudioFilenames();
+    const existingFilenames = getExistingAudioFilenames();
 
-    const labels =
-      scriptState?.get('labels') || [];
+    const labels = scriptState?.get('labels') || [];
 
     for (const label of labels) {
       existingFilenames.add(label);
@@ -295,11 +286,8 @@ async function main($container) {
       return originalFilename;
     }
 
-    const dotIndex =
-      originalFilename.lastIndexOf('.');
-
+    const dotIndex = originalFilename.lastIndexOf('.');
     const hasExtension = dotIndex > 0;
-
     const basename = hasExtension
       ? originalFilename.slice(0, dotIndex)
       : originalFilename;
@@ -309,67 +297,202 @@ async function main($container) {
       : '';
 
     let index = 2;
-    let candidate =
-      `${basename}-${index}${extension}`;
+    let candidate = `${basename}-${index}${extension}`;
 
     while (existingFilenames.has(candidate)) {
       index += 1;
-      candidate =
-        `${basename}-${index}${extension}`;
+      candidate = `${basename}-${index}${extension}`;
     }
 
     return candidate;
   }
 
 
-  async function syncUserSoundbankToScript() {
-    if (
-      !scriptState
-      || !userSoundbankFilesystem
+  function getAudioFilesystemEntries(tree = userSoundbankFilesystem.getTree()) {
+    if (!tree) {
+      return [];
+    }
+
+    const entries = [];
+
+    function visitNode(node) {
+      if (!node) {
+        return;
+      }
+
+      const nodeName = String(node.name || '');
+      const pathname = String(node.relPath || '');
+
+      const isAudioFileNode =
+        node.type === 'file'
+        && AUDIO_FILE_EXTENSION.test(
+          nodeName || pathname,
+        );
+
+      if (isAudioFileNode) {
+        entries.push({
+          label:
+            nodeName
+            || pathname
+              .replaceAll('\\', '/')
+              .split('/')
+              .pop(),
+
+          pathname,
+
+          url: node.url || null,
+        });
+      }
+
+      if (Array.isArray(node.children)) {
+        for (const child of node.children) {
+          visitNode(child);
+        }
+      }
+    }
+
+    visitNode(tree);
+
+    return entries;
+  }
+
+
+
+  async function syncUserSoundbankToScript(
+    tree = userSoundbankFilesystem.getTree(),
+  ) {
+    if (!scriptState || !userSoundbankFilesystem || !tree
     ) {
       return;
     }
 
-    const urlMap = userSoundbankFilesystem.getTreeAsUrlMap(undefined, true,);
-
     const userSoundFiles =
-      Object.entries(urlMap)
-        .filter(([pathname]) => {
-          return AUDIO_FILE_EXTENSION.test(
-            pathname,
+      getAudioFilesystemEntries(tree)
+        .filter(soundFile => {
+          return Boolean(
+            soundFile.label
+            && soundFile.pathname
+            && soundFile.url,
           );
         })
-        .map(([pathname, url]) => {
-          const label = pathname
-            .split('/')
-            .pop();
-
-          /*
-           * Le player tourne éventuellement
-           * sur la Raspberry Pi.
-           *
-           * Il lui faut donc une URL absolue,
-           * et non une URL relative au navigateur.
-           */
-          const absoluteUrl = new URL(url, window.location.origin).href;
+        .map(soundFile => {
           return {
-            label,
-            url: absoluteUrl,
-          };
+            label: soundFile.label,
 
+            pathname: soundFile.pathname,
+
+            url:
+            new URL(
+              soundFile.url,
+              window.location.origin,
+            ).href,
+          };
         });
+
+    const currentReloadRequest =
+      Number(
+        scriptState.get(
+          'reloadUserSoundsRequest',
+        ),
+      ) || 0;
+
+    console.log('[Filesystem] Synchronisation :', userSoundFiles);
 
     await scriptState.set({
       userSoundFiles,
-
-      /*
-       * Garantit que le player reçoit
-       * une nouvelle demande, même si la liste
-       * de fichiers semble identique.
-       */
-      reloadUserSoundsRequest:
-        Date.now(),
+      reloadUserSoundsRequest: currentReloadRequest + 1,
     });
+  }
+
+
+
+  function waitForImportedFiles(
+    filenames,
+    timeoutMs = 10000,
+  ) {
+    const expectedFilenames =
+      new Set(filenames);
+
+    return new Promise(
+      (resolve, reject) => {
+        let unsubscribe = null;
+        let timeout = null;
+        let finished = false;
+
+        function cleanup() {
+          if (unsubscribe) {
+            unsubscribe();
+            unsubscribe = null;
+          }
+
+          if (timeout) {
+            clearTimeout(timeout);
+            timeout = null;
+          }
+        }
+
+        function checkTree(tree) {
+          if (finished || !tree) {
+            return;
+          }
+
+          const entries = getAudioFilesystemEntries(tree);
+
+          const availableFilenames =
+            new Set(
+              entries.map(entry => {
+                return entry.label;
+              }),
+            );
+
+          const allFilesArePresent =
+            [...expectedFilenames].every(
+              filename => {
+                return availableFilenames.has(
+                  filename,
+                );
+              },
+            );
+
+          if (allFilesArePresent) {
+            finished = true;
+            cleanup();
+            resolve(tree);
+          }
+        }
+
+        unsubscribe =
+          userSoundbankFilesystem.onUpdate(
+            tree => {
+              checkTree(tree);
+            },
+          );
+
+        timeout = setTimeout(
+          () => {
+            if (finished) {
+              return;
+            }
+
+            finished = true;
+            cleanup();
+
+            reject(
+              new Error(
+                'Le plugin Filesystem n’a pas actualisé '
+                + 'la liste des sons après l’import.',
+              ),
+            );
+          },
+          timeoutMs,
+        );
+
+
+        checkTree(
+          userSoundbankFilesystem.getTree(),
+        );
+      },
+    );
   }
 
 
@@ -381,40 +504,26 @@ async function main($container) {
       return;
     }
 
-    const record =
-      scriptState.get('record');
+    const record = scriptState.get('record');
+    const training = scriptState.get('training');
+    const waitingGesture = scriptState.get('waitingGesture',);
 
-    const training =
-      scriptState.get('training');
-
-    const waitingGesture =
-      scriptState.get('waitingGesture');
-
-    if (
-      record
-      || training
-      || waitingGesture
-    ) {
+    if (record || training || waitingGesture) {
       await scriptState.set({
-        lastError:
-          'Terminez l’enregistrement en cours avant d’importer un son.',
+        lastError: 'Terminez l’enregistrement en cours '
+          + 'avant d’importer un son.',
       });
 
       return;
     }
 
-    const droppedFiles =
-      Object.values(
-        event.detail?.value || {},
-      );
-
-    const audioFiles =
-      droppedFiles.filter(isAudioFile);
+    const droppedFiles = Object.values(event.detail?.value || {});
+    const audioFiles = droppedFiles.filter(isAudioFile);
 
     if (audioFiles.length === 0) {
       await scriptState.set({
-        lastError:
-          'Aucun fichier audio valide n’a été déposé.',
+        lastError: 'Aucun fichier audio valide '
+          + 'n’a été déposé.',
       });
 
       return;
@@ -423,8 +532,7 @@ async function main($container) {
     try {
       await scriptState.set({
         status: 'uploading-sounds',
-        lastMessage:
-          `Import de ${audioFiles.length} son(s)...`,
+        lastMessage: `Import de ${audioFiles.length} son(s)...`,
         lastError: '',
       });
 
@@ -436,6 +544,8 @@ async function main($container) {
             file.name,
           );
 
+        console.log('[Filesystem] Import :', filename);
+
         await userSoundbankFilesystem.writeFile(
           filename,
           file,
@@ -444,15 +554,19 @@ async function main($container) {
         importedFilenames.push(filename);
       }
 
+      //On attend que l’arbre du client contienne
+      // réellement tous les nouveaux fichiers.
+      const updatedTree = await waitForImportedFiles(importedFilenames);
 
-      await syncUserSoundbankToScript();
-
+      // On transmet directement cet arbre actualisé.
+      await syncUserSoundbankToScript(updatedTree,);
 
       await scriptState.set({
         status: 'ready',
         lastMessage:
           `${importedFilenames.length} son(s) importé(s) : `
           + importedFilenames.join(', '),
+
         lastError: '',
       });
     } catch (error) {
@@ -465,14 +579,128 @@ async function main($container) {
         status: 'error',
         lastError:
           `Impossible d’importer les sons : ${
-            error?.message || String(error)
+            error?.message
+            || String(error)
           }`,
       });
     }
   }
 
 
+  function normalizeFilename(value) {
+    return String(value || '')
+      .normalize('NFC')
+      .replace(/[’‘]/g, "'")
+      .trim()
+      .toLowerCase();
+  }
 
+
+  function findSoundEntry(label) {
+    const expectedLabel = normalizeFilename(label);
+    const entries = getAudioFilesystemEntries();
+
+    const soundEntry =
+      entries.find(entry => {
+        return normalizeFilename(
+          entry.label,
+        ) === expectedLabel;
+      });
+
+    console.log('[Filesystem] Recherche :',
+      {
+        label,
+        expectedLabel,
+        entries,
+        soundEntry,
+      },
+    );
+
+    return soundEntry || null;
+  }
+
+
+
+  async function deleteSound(label) {
+    if (!scriptState || !userSoundbankFilesystem || !label) {
+      return;
+    }
+
+    const record = scriptState.get('record');
+    const training = scriptState.get('training');
+    const waitingGesture = scriptState.get('waitingGesture');
+
+    if (record || training || waitingGesture) {
+      await scriptState.set({
+        lastError: 'Terminez l’enregistrement en cours '
+          + 'avant de supprimer un son.',
+      });
+
+      return;
+    }
+
+    const confirmed = window.confirm(`Supprimer définitivement le son "${label}" du serveur ?`);
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      //On récupère directement le nœud du plugin et son relPath exact.
+      const soundEntry = findSoundEntry(label);
+
+      if (!soundEntry) {
+        throw new Error(
+          `Le fichier "${label}" est introuvable `
+          + 'dans le dossier surveillé par le plugin.',
+        );
+      }
+
+      if (!soundEntry.pathname) {
+        throw new Error(
+          `Le fichier "${label}" ne possède pas de relPath.`,
+        );
+      }
+
+      const pathname = soundEntry.pathname;
+
+      await scriptState.set({
+        status: 'deleting-sound',
+        lastMessage: `Suppression de "${label}"...`,
+        lastError: '',
+        previewLabel: null,
+      });
+
+      console.log('[Filesystem] Suppression demandée :',
+        { label,
+          pathname,
+          soundEntry,
+        },
+      );
+
+
+      //Suppression définitive effectuée
+      await userSoundbankFilesystem.rm(pathname);
+      await syncUserSoundbankToScript();
+
+      await scriptState.set({
+        status: 'ready',
+        lastMessage: `Son supprimé définitivement : "${label}".`,
+        lastError: '',
+      });
+    } catch (error) {
+
+      console.error('[Filesystem] Erreur de suppression :', error);
+
+      await scriptState.set({
+        status: 'error',
+        lastError: `Impossible de supprimer "${label}" : ${
+            error?.message
+            || String(error)
+          }`,
+      });
+    }
+  }
 
 
 
@@ -488,6 +716,7 @@ async function main($container) {
         </section>
       `;
     }
+
 
     const labels = scriptState.get('labels') || [];
     const selectedLabel = scriptState.get('selectedLabel');
@@ -522,31 +751,80 @@ async function main($container) {
     );
 
 
-
     return html`
+      <header class="top-bar">
 
-      <!---- Title ---->
+        <!---------- Infos Sources ---------->
+        <div class="top-bar-left">
+          <button
+            class="players-toggle ${playersExpanded ? 'expanded' : ''}"
+            @click=${togglePlayersExpanded}
+          >
+            <strong>
+              Infos Sources
+            </strong>
+
+            <span class="toggle-icon">
+                ${playersExpanded ? '−' : '+'}
+            </span>
+          </button>
+        </div>
+
+
+        <!---------- Titre ---------->
+        <div class="top-bar-center">
+          <h1>
+            CoMo.education App Prototype
+          </h1>
+        </div>
+
+
+        <!---------- Contrôles audio ---------->
+        <div class="top-bar-right">
+          ${gesturePlayerState ? html`
+            <div class="master-controls">
+
+              <!------ Volume ------->
+              <div class="volume-control">
+                <span>
+                  Volume
+                </span>
+
+                <sc-slider
+                  number-box
+                  min=${gesturePlayerState.getDescription('volume').min}
+                  max=${gesturePlayerState.getDescription('volume').max}
+                  value=${gesturePlayerState.get('volume')}
+                  @input=${event => {
+                    gesturePlayerState.set('volume', event.detail.value);
+                  }}
+                ></sc-slider>
+              </div>
+
+
+            <!------ Mute ------->
+              <div class="mute-control">
+                <button
+                  class="mute-button ${gesturePlayerState.get('mute') ? 'active-mute' : ''}"
+                    @click=${() => gesturePlayerState.set('mute', !gesturePlayerState.get('mute'))}
+                >
+                  ${gesturePlayerState.get('mute') ? 'Unmute' : 'Mute'}
+                </button>
+              </div>
+            </div>
+      ` : nothing}
+        </div>
+      </header>
+
+
+
+
       <section class="app-panel">
-        <h1 class = "center">
-          CoMo.education App Prototype
-        </h1>
-        <h3 class="center">
+
+        <!--<h3 class="center">
           Choisissez un son, enregistrez un geste, puis passez en mode jouer pour déclencher le bon son avec le geste reconnu.
         </h3>
-
-
-        <button
-          class="players-toggle ${playersExpanded ? 'expanded' : ''}"
-          @click=${togglePlayersExpanded}>
-          <strong>
-            Infos Sources
-          </strong>
-
-          <span class="toggle-icon">
-            ${playersExpanded ? '−' : '+'}
-          </span>
-        </button>
-
+        -->
 
         ${playersExpanded ? html`
           <!----- Source ----->
@@ -564,32 +842,32 @@ async function main($container) {
             ${sources.length === 0 ? html`
               ` : sources.map(source => {
 
-              return html`
-                <div class="source-status ${source.get('active') ? 'connected' : 'disconnected'}">
-                  <sc-status
-                    ?active=${source.get('active')}>
-                  </sc-status>
+                return html`
+                  <div class="source-status ${source.get('active') ? 'connected' : 'disconnected'}">
+                    <sc-status
+                      ?active=${source.get('active')}>
+                    </sc-status>
 
-                  <span class="source-state">
-                    ${source.get('active') ? 'Source connectée' : 'Source déconnectée'}
-                  </span>
-
-                  <strong class="source-name">
-                    id: ${source.get('id')}
-                  </strong>
-
-                  ${source.get('type') ? html`
-                    <span class="source-type">
-                      type: ${source.get('type')}
+                    <span class="source-state">
+                      ${source.get('active') ? 'Source connectée' : 'Source déconnectée'}
                     </span>
-                    ` : nothing
-                  }
-                </div>
-              `;
-            })}
-          </section>
-          ` : nothing}
 
+                    <strong class="source-name">
+                      id: ${source.get('id')}
+                    </strong>
+
+
+                    ${source.get('type') ? html`
+                      <span class="source-type">
+                        type: ${source.get('type')}
+                      </span>
+                        ` : nothing
+                    }
+                  </div>
+                `;
+              })}
+          </section>
+        ` : nothing}
 
 
         <!---------- Modes Button ------------->
@@ -615,40 +893,6 @@ async function main($container) {
         </div>
 
 
-        <!---------- Master Parameters --------->
-        ${gesturePlayerState ? html`
-          <div class="master-controls">
-
-            <!------ Volume Slider ------->
-            <div class="volume-control">
-              <strong class="volume-control">
-                Volume
-              </strong>
-
-              <sc-slider
-                number-box
-                min=${gesturePlayerState.getDescription('volume').min}
-                max=${gesturePlayerState.getDescription('volume').max}
-                value=${gesturePlayerState.get('volume')}
-                @input=${e => gesturePlayerState.set('volume', e.detail.value)}
-              ></sc-slider>
-            </div>
-
-
-            <!------- Mute ------->
-            <div class="mute-control">
-              <button
-                class="mute-button ${gesturePlayerState.get('mute') ? 'active-mute' : ''}"
-                @click=${() => gesturePlayerState.set('mute', !gesturePlayerState.get('mute'))}
-              >
-                ${gesturePlayerState.get('mute') ? 'Unmute' : 'Mute'}
-              </button>
-            </div>
-          </div>
-        ` : nothing}
-
-
-
         <!---------- Console ------------>
         <div class="message-box">
           <p>
@@ -670,8 +914,11 @@ async function main($container) {
         <!-------------  Left Column ------------->
         <div class="app-grid">
           <div class="scroller">
-            <section class="sub-panel left-column">
-
+            <section class="sub-panel left-column ${
+                mode === 'play'
+                  ? 'disabled-column'
+                  : ''
+                }">
 
               <sc-dragndrop
                 format="raw"
@@ -685,8 +932,7 @@ async function main($container) {
                   </strong>
 
                   <span>
-                    Glissez-déposez ici vos fichiers
-                    WAV, MP3, OGG, M4A ou FLAC
+                    Glissez-déposez ici vos fichiers audio
                   </span>
                 </div>
               </sc-dragndrop>
@@ -707,27 +953,44 @@ async function main($container) {
                   ${labels.map(label => {
                     const isPreviewing = previewLabel === label;
 
-                    return html `
+                    return html`
                       <div
                         class="sound-row ${selectedLabel === label ? 'selected' : ''}">
-                        <span>
+                        <span class="sound-label">
                           ${label}
                         </span>
 
-                        <!---- Listen Sound Button ----->
+                        <!-------- Écouter -------->
                         <button
-                          class="listen-button ${isPreviewing ? 'active-mode' : ''}"
+                          class="listen-button ${isPreviewing
+                            ? 'active-mode'
+                            : ''}"
                           @click=${() => togglePreviewSound(label)}
                         >
-                          ${isPreviewing ? 'Arrêter' : 'Écouter'}
+                          ${isPreviewing
+                            ? 'Arrêter'
+                            : 'Écouter'
+                          }
                         </button>
 
-
-                        <!--  Select Sound Button -->
+                        <!-------- Sélectionner -------->
                         <button
                           class="select-button ${selectedLabel === label ? 'active-mode' : ''}"
-                          @click=${() => setSelectedLabel(label)}>
-                          ${selectedLabel === label ? 'Sélectionné' : 'Sélectionner'}
+                          @click=${() => setSelectedLabel(label)}
+                        >
+                          ${selectedLabel === label
+                            ? 'Sélectionné'
+                            : 'Sélectionner'
+                          }
+                        </button>
+
+                        <!-------- Supprimer -------->
+                        <button
+                          class="delete-sound-button"
+                          @click=${() => void deleteSound(label)}
+                          ?disabled=${record || training || waitingGesture}
+                        >
+                          Supprimer
                         </button>
                       </div>
                     `;
@@ -769,23 +1032,25 @@ async function main($container) {
                   type="text"
                   placeholder="Donnez un nom au geste..."
                   .value=${gestureName}
-                  @input=${event => {
-                    setGestureName(event.target.value);
-                  }}
+                  @input=${event => setGestureName(event.target.value)}
                   ?disabled=${record || training || mode !== 'learn'}
                 >
               </div>
 
 
-
-
               <!----  Record Gesture Button -->
               <button
-                class=${record ? 'recording' : 'record'}
+                class=${record
+                  ? 'recording'
+                  : 'record'
+                }
                 @click=${toggleRecord}
                 ?disabled=${!selectedLabel || !gestureName.trim () ||training || waitingGesture || mode !== 'learn'}
               >
-                ${record ? 'Arreter' : 'Enregistrer'}
+                ${record
+                  ? 'Arreter'
+                  : 'Enregistrer'
+                }
               </button>
 
               ${mode !== 'learn' ? html`
@@ -804,7 +1069,8 @@ async function main($container) {
               >
                 ${waitingPreview
                   ? 'Arrêter le test'
-                  : 'Tester le geste'}
+                  : 'Tester le geste'
+                }
               </button>
 
               <button
@@ -888,7 +1154,7 @@ async function main($container) {
         :root {
 
           --gray: rgba(255, 255, 255, 0.1);
-          --gray-bg: rgba(255, 255, 255, 0.06);
+          --gray-bg: rgba(255, 255, 255, 0.08);
 
 
           --red: rgba(255, 104, 104, 1);
@@ -902,9 +1168,26 @@ async function main($container) {
           --green-border: rgba(51, 204, 51, 1);
 
           --white-border: rgba(255, 255, 255, 1);
+          --white-low: rgba(255, 255, 255, 0.5);
 
           --cyan-bg: rgba(51, 204, 204, 0.8);
           --blue: rgba(0, 153, 255, 1);
+
+          --app-bg: rgba(35, 35, 35, 1);
+          --black: rgba(26, 26, 26, 1);
+        }
+
+        html,
+        body {
+          margin: 0;
+          min-height: 100%;
+          background-color: var(--app-bg);
+          color: white;
+        }
+
+        body > div {
+          min-height: 100vh;
+          background-color: inherit;
         }
 
 
@@ -914,16 +1197,50 @@ async function main($container) {
           justify-content: center;
           align-items: center;
           border-radius: 12px;
-          padding: 20px;
           max-width: 1900px;
+          padding-left: 20px;
+          padding-right: 20px;
+          background-color: transparent;
         }
 
-        header {
-          display: flex;
+        .top-bar {
+          display: grid;
+          grid-template-columns: minmax(220px, 1fr) auto minmax(320px, 1fr);
           align-items: center;
-          justify-content: center;
-          gap: 16px;
+          gap: 24px;
+
+          width: 100%;
+          box-sizing: border-box;
+          padding: 12px 20px;
           margin-bottom: 16px;
+
+          border: 1px solid var(--gray-bg);
+          border-radius: 10px;
+          background: var(--gray-bg);
+        }
+
+        .top-bar-left {
+          display: flex;
+          justify-content: flex-start;
+          align-items: center;
+        }
+
+        .top-bar-center {
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          text-align: center;
+        }
+
+        .top-bar-center h1 {
+          margin: 0;
+          white-space: nowrap;
+        }
+
+        .top-bar-right {
+          display: flex;
+          justify-content: flex-end;
+          align-items: center;
         }
 
 
@@ -951,9 +1268,11 @@ async function main($container) {
 
 
         .right-column {
+          min-width: 100px;
           display: flex;
           flex-direction: column;
           gap: 20px;
+
         }
 
         .sub-panel {
@@ -1082,17 +1401,17 @@ async function main($container) {
         /* -------- Master Control ----- */
         .master-controls {
           display: flex;
-          justify-content: center;
-          align-items: flex-end;
-          gap: 80px;
+          justify-content: flex-end;
+          align-items: center;
+          gap: 24px;
 
-          width: 100%;
-          margin: 24px auto;
+          width: auto;
+          margin: 0;
         }
 
         button.mute-button {
           min-width: 110px;
-          min-height: 40px;
+          min-height: 30px;
           background: var(--gray-bg);
           border-color: var(--white-border);
           font-size: 1.1rem;
@@ -1115,21 +1434,23 @@ async function main($container) {
         }
 
 
-        .volume-control,
-        .mute-control {
+        .volume-control {
           display: flex;
-          flex-direction: column;
+          flex-direction: row;
           align-items: center;
           gap: 12px;
-        }
 
-        .volume-control {
-          width: 200px;
+          width: 240px;
           font-size: 1.1rem;
         }
 
         .volume-control sc-slider {
-          width: 150%;
+          width: 200px;
+        }
+
+        .mute-control {
+          display: flex;
+          align-items: center;
         }
 
 
@@ -1170,25 +1491,55 @@ async function main($container) {
 
         .sound-row {
           display: grid;
-          grid-template-columns: 1fr auto auto;
+
+          grid-template-columns:
+            minmax(0, 1fr)
+            auto
+            auto
+            auto;
+
           align-items: center;
           gap: 12px;
-          padding: 8px;
-          border-radius: 6px;
-          background: var(--gray-bg);
-          border: 1px solid var(--gray-bg) ;
 
+          padding: 8px;
+
+          border-radius: 6px;
+          border: 1px solid var(--gray-bg);
+
+          background: var(--gray-bg);
         }
 
+        .sound-label {
+          min-width: 0;
+
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+
+        button.delete-sound-button {
+          min-width: 100px;
+          background: var(--gray-bg);
+          border-color: var(--red-border);
+        }
+
+        button.delete-sound-button:hover:not(:disabled) {
+          background: var(--red-bg);
+          border-color: var(--white-border);
+        }
+
+
+
         .scroller {
-          width: 950px;
-          height: 600px;
-          overflow-y: scroll;
+          width: 102%;
+          max-height: 710px;
+          overflow-y: auto;
+          box-sizing: border-box;
+
           scrollbar-color: var(--white-border) transparent;
           scrollbar-width: thin;
         }
-
-
 
 
 
@@ -1210,7 +1561,6 @@ async function main($container) {
 
         /* ---- Listen / Stop Button---- */
         button.listen-button {
-          background: var(--gray-bg);
           border-color: var(--white-border);
           min-width: 110px;
         }
@@ -1304,9 +1654,14 @@ async function main($container) {
           cursor: not-allowed;
         }
 
+        .left-column.disabled-column {
+          opacity: 0.45;
+          pointer-events: none;
+          user-select: none;
+        }
 
 
-
+        
         /* ------------ Gesture Name ------------- */
         .gesture-name-control {
           display: flex;
@@ -1324,7 +1679,7 @@ async function main($container) {
           width:50%;
           box-sizing: border-box;
           padding: 10px 12px;
-          border: 1px solid var(--white-border);
+          border: 1px solid var(--white-low);
           border-radius: 6px;
           background: var(--gray-bg);
           color: inherit;
@@ -1336,7 +1691,7 @@ async function main($container) {
 
         .gesture-name-input:focus {
           outline: none;
-          border-color: var(--blue);
+          border-color: var(--white-border);
         }
 
         .gesture-name-input:disabled {
@@ -1398,12 +1753,11 @@ async function main($container) {
           max-width: 620px;
           height: 120px;
           margin: 16px auto 24px;
+          border: 1px solid var(--orange-bg);
+          background: var(--black);
 
-          --sc-dragndrop-dragged-background-color:
-            var(--blue);
-
-          --sc-dragndrop-processing-background-color:
-            var(--orange-bg);
+          --sc-dragndrop-dragged-background-color: var(--gray);
+          --sc-dragndrop-processing-background-color: var(--orange-bg);
         }
 
         sc-dragndrop.sound-dragndrop.disabled {
@@ -1421,17 +1775,27 @@ async function main($container) {
 
           width: 100%;
           height: 100%;
-
           text-align: center;
+
         }
 
         .sound-drop-content strong {
-          font-size: 1.2rem;
+          font-size: 1.4rem;
+          opacity: 1;
         }
 
 
         .sound-drop-content span {
-          opacity: 0.75;
+          opacity: 1;
+          font-size: 1.2rem;
+        }
+
+
+        .info {
+          border-radius: 8px;
+          padding: 12px;
+          margin: 16px 0;
+          font-size: 1.0rem;
         }
 
 

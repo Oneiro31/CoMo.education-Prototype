@@ -56,7 +56,6 @@ async function bootstrap() {
   const player = await como.playerManager.getPlayer(playerId);
 
 
-
   await player.state.set({
     sessionId: null,
   });

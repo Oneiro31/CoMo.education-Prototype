@@ -1,3 +1,8 @@
+import { Intensity } from '@ircam/sc-motion/Intensity.js';
+import { CategoricalHysteresis } from '@ircam/sc-signal/CategoricalHysteresis.js';
+import { GestureSoundSynth } from './gesture-sound/GestureSoundSynth.js';
+
+
 const {
   audioContext,
   como,
@@ -30,12 +35,10 @@ export async function defineSharedState() {
         nullable: true,
       },
 
-
       gestureName: {
         type: 'string',
         default: '',
       },
-
 
       previewLabel: {
         type: 'string',
@@ -43,12 +46,10 @@ export async function defineSharedState() {
         nullable: true,
       },
 
-
       record: {
         type: 'boolean',
         default: false,
       },
-
 
       mode: {
         type: 'string',
@@ -60,13 +61,11 @@ export async function defineSharedState() {
         default: false,
       },
 
-
       recognizedLabel: {
         type: 'string',
         default: null,
         nullable: true,
       },
-
 
       waitingGesture: {
         type: 'any',
@@ -89,12 +88,10 @@ export async function defineSharedState() {
         default: 0,
       },
 
-
       examples: {
         type: 'any',
         default: {},
       },
-
 
       deleteExampleUuid: {
         type: 'string',
@@ -102,25 +99,21 @@ export async function defineSharedState() {
         nullable: true,
       },
 
-
       clearLabel: {
         type: 'string',
         default: null,
         nullable: true,
       },
 
-
       clearAllRequest: {
         type: 'integer',
         default: 0,
       },
 
-
       status: {
         type: 'string',
         default: 'idle',
       },
-
 
       lastMessage: {
         type: 'string',
@@ -138,19 +131,26 @@ export async function defineSharedState() {
 }
 
 
-
 const MODEL_ID = 'gesture-sound_short';
 const MODEL_PRESET = 'shortGestures';
 const FRAME_TIMEOUT_MS = 500;
 const FRAME_TIMEOUT_INTERVAL_MS = 200;
 const WAITING_LABEL_PREFIX = '__waiting__:';
+const MODEL_LABEL_SEPARATOR = '|||';
 
+
+// Intensity Parameters
+const INTENSITY_WINDOW_SIZE = 3;
+const INTENSITY_FEEDBACK = 0.7;
+const INTENSITY_PROCESS_GAIN = 0.07;
+
+// Categorical buffer size
+const HYSTERESIS_BUFFER_SIZE = 15;
 
 
 let model = null;
 let synth = null;
 let recordExample = null;
-
 let unsubscribeState = null;
 let unsubscribeModel = null;
 let lastClearAllRequest = 0;
@@ -159,269 +159,37 @@ let lastFrameTime = 0;
 let waitingExample = null;
 let waitingInfos = null;
 let recordingInfos = null;
+let intensityProcessor = null;
+let previewHysteresis= null;
+let playHysteresis= null;
+let loadedUserSoundLabels = new Set();
 
 
 
-// -------- Audio Synthesis  -------------------
-class GestureSoundSynth {
-  constructor({ audioContext, soundbank, output }) {
-    this.audioContext = audioContext;
-
-    this.soundbank = {
-      ...soundbank,
-    };
-
-    // CoMo output
-    this.output = output;
-
-    // General gain of the synthesis
-    this.master = new GainNode(this.audioContext, {
-      gain: 1,
-    });
-
-    this.master.connect(this.output);
-    this.activeSources = new Set();
-    this.currentChannel = null;
-    this.currentLoopLabel = null;
-
-  }
-
-  get labels() {
-    return Object.keys(this.soundbank);
-  }
-
-
-  hasSound(label) {
-    return Boolean(label && this.soundbank[label]);
-  }
-
-
-  addSound(label, audioBuffer) {
-    if (!label || !audioBuffer) {
-      return false;
-    }
-
-    this.soundbank[label] = audioBuffer;
-    return true;
-  }
-
-
-  // --- Fade In ---
-  fadeIn(time = 0.2) {
-    this.master.gain.setTargetAtTime(
-      1,
-      this.audioContext.currentTime,
-      time,
-    );
-  }
-
-
-  // --- Fade Out ---
-  fadeOut(time = 0.2) {
-    this.master.gain.setTargetAtTime(
-      0,
-      this.audioContext.currentTime,
-      time,
-    );
-  }
-
-
-  // ---------- Play Sound ---------
-  play(label, options = {}) {
-    const {
-      gain = 1,
-      loop = false,
-      when = this.audioContext.currentTime,
-      fadeInTime = 0,
-      onEnded = null,
-    } = options;
-
-    const buffer = this.soundbank[label];
-
-    if (!buffer) {
-      console.warn(`No sound found for "${label}"`);
-      return null;
-    }
-
-    const src = new AudioBufferSourceNode(this.audioContext, {
-      buffer,
-      loop,
-    });
-
-    const amplitude = new GainNode(this.audioContext, {
-      gain: fadeInTime > 0 ? 0 : gain,
-    });
-
-    src.connect(amplitude).connect(this.master);
-
-    const channel = {
-      label,
-      src,
-      amplitude,
-    };
-
-    this.activeSources.add(channel);
-
-    src.onended = () => {
-      this.activeSources.delete(channel);
-
-      if (this.currentChannel === channel) {
-        this.currentChannel = null;
-      }
-
-      if (this.currentLoopLabel === label && this.currentChannel === null) {
-        this.currentLoopLabel = null;
-      }
-
-      try {
-        src.disconnect();
-        amplitude.disconnect();
-      } catch (err) {}
-
-      if (typeof onEnded === 'function') {
-        onEnded(channel);
-      }
-
-    };
-
-    src.start(when);
-
-    if (fadeInTime > 0) {
-      amplitude.gain.setValueAtTime(0, when);
-      amplitude.gain.setTargetAtTime(gain, when, fadeInTime);
-    }
-
-    return channel;
-  }
-
-  // ---------- Preview Sound ---------
-  preview(label, options = {}) {
-    const {
-      onEnded = null,
-    } = options;
-
-    //  We cut what's playing and reset the volume to 1.
-    this.stopAll();
-
-    this.master.gain.setValueAtTime(
-      1,
-      this.audioContext.currentTime,
-    );
-
-    const channel = this.play(label, {
-      gain: 1,
-      loop: false,
-      onEnded,
-    });
-
-    this.currentChannel = channel;
-
-    return channel;
-  }
-
-
-  // ---------- Loop Sound ---------
-  loop(label, options = {}) {
-    const {
-      fadeInTime = 0.1,
-      fadeOutTime = 0.1,
-      gain = 1,
-    } = options;
-
-    if (this.currentLoopLabel === label && this.currentChannel) {
-      return this.currentChannel;
-    }
-
-    // Old sound: fade out
-    for (const channel of [...this.activeSources]) {
-      this.stopChannel(channel, {
-        fade: true,
-        fadeOutTime,
-      });
-    }
-
-    // New sound : fade in
-    const channel = this.play(label, {
-      gain,
-      loop: true,
-      fadeInTime,
-    });
-
-    this.currentChannel = channel;
-    this.currentLoopLabel = label;
-
-    return channel;
-  }
-
-
-  // ---------- Stop Channel ---------
-  stopChannel(channel, options = {}) {
-    if (!channel) {
-      return;
-    }
-
-    const {
-      fade = false,
-      fadeOutTime = 0.1,
-      stopDelay = fadeOutTime * 2,
-    } = options;
-
-    if (fade) {
-      const now = this.audioContext.currentTime;
-      const stopTime = now + stopDelay;
-
-      try {
-        channel.amplitude.gain.cancelScheduledValues(now);
-        channel.amplitude.gain.setValueAtTime(channel.amplitude.gain.value, now);
-        channel.amplitude.gain.setTargetAtTime(0, now, fadeOutTime);
-
-        channel.src.stop(stopTime);
-      } catch (err) {}
-    } else {
-      try {
-        channel.src.stop();
-      } catch (err) {}
-    }
-
-    this.activeSources.delete(channel);
-
-    if (this.currentChannel === channel) {
-      this.currentChannel = null;
-      this.currentLoopLabel = null;
-    }
-  }
-
-
-  // ------ Stop All ------
-  stopAll(options = {}) {
-    for (const channel of [...this.activeSources]) {
-      this.stopChannel(channel, options);
-    }
-
-    if (!options.fade) {
-      this.activeSources.clear();
-    }
-
-    this.currentChannel = null;
-    this.currentLoopLabel = null;
-  }
-
-
-  // ------ Disconnect ------
-  disconnect() {
-    this.stopAll();
-
-    try {
-      this.master.disconnect();
-    } catch (err) {}
-  }
-}
-
-
-
-// --------------- Enter () --------------
+// --------------- Enter () ----------------
 export async function enter(context) {
-  const { state, soundbank, output } = context;
+  const {
+    state,
+    soundbank,
+    output,
+  } = context;
+
+
+  intensityProcessor = new Intensity({
+    windowSize: INTENSITY_WINDOW_SIZE,
+    feedback: INTENSITY_FEEDBACK,
+    gain: INTENSITY_PROCESS_GAIN,
+  });
+
+
+  previewHysteresis = new CategoricalHysteresis({
+    bufferSize: HYSTERESIS_BUFFER_SIZE,
+  });
+
+  playHysteresis = new CategoricalHysteresis({
+    bufferSize: HYSTERESIS_BUFFER_SIZE,
+  });
+
 
   synth = new GestureSoundSynth({
     audioContext,
@@ -518,14 +286,11 @@ export async function enter(context) {
             onEnded: () => {
 
               if (state.get('previewLabel') === label) {
-                void state.set({
+                state.set({
                   previewLabel: null,
                   lastMessage: `Lecture terminée : "${label}"`,
                 }).catch(err => {
-                  console.error(
-                    'erreur de fin de preview :',
-                    err,
-                  );
+                  console.error('erreur de fin de preview :', err);
                 });
               }
             },
@@ -587,16 +352,22 @@ export async function enter(context) {
 
 
       if ('mode' in updates) {
+        previewHysteresis?.init();
+        playHysteresis?.init();
+
         if (updates.mode !== 'play' && synth) {
           synth.stopAll({
-            fade: true,
-            fadeOutTime: 0.1,
+            fade: false,
           });
+
+          synth.resetIntensityGain();
         }
 
         await state.set({
           recognizedLabel: null,
-          status: updates.mode === 'play' ? 'playing' : 'ready',
+          status: updates.mode === 'play'
+            ? 'playing'
+            : 'ready',
           lastMessage: updates.mode === 'play'
             ? 'Mode de jeu activé'
             : 'Mode d’apprentissage activé',
@@ -613,12 +384,13 @@ export async function enter(context) {
       }
 
       if ('waitingPreview' in updates) {
+        previewHysteresis?.init();
+
         if (updates.waitingPreview === true) {
           await state.set({
             recognizedLabel: null,
             status: 'previewing-waiting',
-            lastMessage:
-              'Test actif : refaites maintenant le geste enregistré.',
+            lastMessage: 'Test actif : refaites maintenant le geste enregistré.',
             lastError: '',
           });
         } else {
@@ -630,12 +402,10 @@ export async function enter(context) {
           await state.set({
             recognizedLabel: null,
             status: 'waiting-validation',
-            lastMessage:
-              'Test arrêté. Validez ou annulez le geste.',
+            lastMessage: 'Test arrêté. Validez ou annulez le geste.',
           });
         }
       }
-
 
 
       if ('deleteExampleUuid' in updates && updates.deleteExampleUuid) {
@@ -670,9 +440,12 @@ export async function enter(context) {
     lastMessage: 'Application prête.',
   });
 }
+// ----------------------------------------
 
 
-// -------- Exit () ------------------
+
+
+// -------------- Exit () ------------------
 export async function exit() {
   if (unsubscribeState) {
     unsubscribeState();
@@ -699,8 +472,29 @@ export async function exit() {
     frameTimeoutInterval = null;
   }
 
+  if (intensityProcessor) {
+    intensityProcessor.reset();
+    intensityProcessor = null;
+  }
+
+
+  if (previewHysteresis) {
+    previewHysteresis.init();
+    previewHysteresis = null;
+  }
+
+  if (playHysteresis) {
+    playHysteresis.init();
+    playHysteresis = null;
+  }
+
   recordExample = null;
+  loadedUserSoundLabels.clear();
+
 }
+// --------------------------------------
+
+
 
 
 // ---------- Process () --------------------
@@ -708,18 +502,80 @@ export async function process(context, frame) {
   lastFrameTime = performance.now();
 
   const { state } = context;
+  const motionFrame = frame?.[0];
+
+  if (
+    !motionFrame
+    || !motionFrame.accelerometer
+    || !motionFrame.gyroscope
+    || !motionFrame.gravity
+  ) {
+    return;
+  }
+
+  if (!intensityProcessor) {
+    return;
+  }
+
 
   if (!model || state.get('training')) {
     return;
   }
 
+  let intensity = null;
+
+  try {
+    intensity = intensityProcessor.process({
+      api: motionFrame.api || 'v3',
+      timestamp: Number.isFinite(motionFrame.timestamp)
+        ? motionFrame.timestamp
+        : performance.now(),
+
+      accelerometer:
+      motionFrame.accelerometer,
+    });
+  } catch (error) {
+    console.error('Erreur Intensity :', error);
+    return;
+  }
+
+  const intensityNorm = Number.isFinite(intensity?.norm)
+    ? intensity.norm
+    : 0;
+
+
+  const isWaitingPreview = state.get('waitingPreview') === true;
+  const isPlayMode = state.get('mode') === 'play';
+  const intensityControlsAudio = isWaitingPreview || isPlayMode;
+
+  if (intensityControlsAudio) {
+    synth?.setIntensity(intensityNorm);
+  } else {
+    synth?.resetIntensityGain();
+  }
+
+
+  // XMM Frame
   const xmmFrame = [
-    frame[0].accelerometer.x,
-    frame[0].accelerometer.y,
-    frame[0].accelerometer.z,
-    frame[0].gyroscope.x,
-    frame[0].gyroscope.y,
-    frame[0].gyroscope.z,
+
+    //Accelerometer
+    motionFrame.accelerometer.x,
+    motionFrame.accelerometer.y,
+    motionFrame.accelerometer.z,
+
+    //Gyroscope
+    motionFrame.gyroscope.x,
+    motionFrame.gyroscope.y,
+    motionFrame.gyroscope.z,
+
+    //Gravity
+    motionFrame.gravity.x,
+    motionFrame.gravity.y,
+    motionFrame.gravity.z,
+
+    //Intensity
+    intensityNorm,
+
   ];
 
   if (state.get('record')) {
@@ -730,10 +586,9 @@ export async function process(context, frame) {
     return;
   }
 
-  const isWaitingPreview =
-    state.get('waitingPreview') === true;
-  // En dehors du test temporaire, la reconnaissance normale
-  // fonctionne seulement en mode play.
+
+  //Apart from the temporary test, normal
+  // recognition works only in play mode.
   if (
     !isWaitingPreview
     && state.get('mode') !== 'play'
@@ -767,7 +622,7 @@ export async function process(context, frame) {
 
 
 
-  // ------ Reconnaissance temporaire ---------
+  // ----------- Preview Recognition -----------
   if (isWaitingPreview) {
     if (!waitingInfos) {
       synth?.stopAll({
@@ -784,15 +639,11 @@ export async function process(context, frame) {
     let previewWinnerScore = -Infinity;
 
     labels.forEach((label, index) => {
-      /*
-       * On accepte :
-       * - le geste temporaire actuel ;
-       * - tous les gestes déjà validés.
-       *
-       * On ignore uniquement d'éventuels anciens
-       * labels temporaires qui ne correspondent pas
-       * au geste en cours.
-       */
+      // We accept the current preview gesture,
+      // and all gestures that have already been approved.
+
+      // We ignore only any previous preview gestures
+      // that do not correspond to the current gesture.
       const isOtherWaitingLabel =
         label.startsWith(WAITING_LABEL_PREFIX)
         && label !== temporaryLabel;
@@ -812,12 +663,19 @@ export async function process(context, frame) {
       }
     });
 
-    /*
-     * Le geste temporaire est reconnu uniquement
-     * s'il est le meilleur résultat produit par XMM.
-     */
-    const accepted =
-      previewWinnerLabel === temporaryLabel;
+
+    // A preview gesture is recognized only
+    // if it is the best result produced by XMM
+
+    // Temporal stabilization of the result
+    let stabilizedPreviewLabel = null;
+
+    if (previewWinnerLabel && previewHysteresis) {
+      stabilizedPreviewLabel = previewHysteresis.process(previewWinnerLabel);
+    }
+
+    const accepted = stabilizedPreviewLabel === temporaryLabel;
+
 
     if (accepted) {
       synth?.loop(waitingInfos.soundLabel, {
@@ -830,14 +688,9 @@ export async function process(context, frame) {
         !== waitingInfos.gestureName
       ) {
         state.set({
-          recognizedLabel:
-          waitingInfos.gestureName,
-
+          recognizedLabel: waitingInfos.gestureName,
           status: 'preview-recognized',
-
-          lastMessage:
-            `Geste reconnu : ${waitingInfos.gestureName}`,
-
+          lastMessage: `Geste reconnu : ${waitingInfos.gestureName}`,
           lastError: '',
         });
       }
@@ -866,37 +719,43 @@ export async function process(context, frame) {
 
 
 
-  // ------ Reconnaissance normale ---------
+
+  // --------- Play Recognition ------------
   let winnerLabel = null;
   let winnerScore = -Infinity;
 
 
   labels.forEach((label, index) => {
-    // Ne jamais utiliser un geste temporaire en mode Jouer
+    // Never use a temporary gesture in Play mode
     if (label.startsWith(WAITING_LABEL_PREFIX)) {
       return;
     }
 
     const score = Number(scores[index]);
 
-    if (
-      Number.isFinite(score)
-      && score > winnerScore
-    ) {
+    if (Number.isFinite(score) && score > winnerScore) {
       winnerLabel = label;
       winnerScore = score;
     }
   });
 
+  let stabilizedWinnerLabel = null;
 
-  if (!winnerLabel) {
+  if (winnerLabel && playHysteresis) {
+    stabilizedWinnerLabel = playHysteresis.process(winnerLabel);
+  }
+
+
+  if (!stabilizedWinnerLabel) {
     synth?.stopAll({
       fade: true,
       fadeOutTime: 0.3,
     });
 
 
-    if (state.get('recognizedLabel') !== null || state.get('status') !== 'playing') {
+    if (state.get('recognizedLabel') !== null
+      || state.get('status')
+      !== 'playing') {
       state.set({
         recognizedLabel: null,
         status: 'playing',
@@ -917,7 +776,7 @@ export async function process(context, frame) {
   const {
     gestureName,
     soundLabel,
-  } = parseModelLabel(winnerLabel);
+  } = parseModelLabel(stabilizedWinnerLabel);
 
 
   synth.loop(soundLabel, {
@@ -935,11 +794,11 @@ export async function process(context, frame) {
     });
   }
 }
+// ----------------------------------------
 
 
 
-const MODEL_LABEL_SEPARATOR = '|||';
-
+// --------- Create Model Label ----------
 function createModelLabel(gestureName, soundLabel) {
   return [
     encodeURIComponent(gestureName.trim()),
@@ -950,7 +809,7 @@ function createModelLabel(gestureName, soundLabel) {
 function parseModelLabel(modelLabel) {
   const parts = modelLabel.split(MODEL_LABEL_SEPARATOR);
 
-  // Compatibilité avec les anciens exemples
+  // Backward Compatibility with Previous Examples
   if (parts.length !== 2) {
     return {
       gestureName: modelLabel,
@@ -993,8 +852,7 @@ async function startRecording(state) {
     await state.set({
       record: false,
       status: 'error',
-      lastError:
-        'Veuillez donner un nom au geste avant de commencer.',
+      lastError: 'Veuillez donner un nom au geste avant de commencer.',
     });
 
     return;
@@ -1025,6 +883,7 @@ async function startRecording(state) {
 }
 
 
+
 // ------- Stop Recording and Train --------
 async function stopRecordingAndPreparePreview(state) {
   if (!recordExample) {
@@ -1033,20 +892,16 @@ async function stopRecordingAndPreparePreview(state) {
 
   const example = recordExample;
   recordExample = null;
-
   const soundLabel = state.get('selectedLabel');
 
-  // Utilise le nom libre si tu as ajouté gestureName.
-  // Sinon, le nom du son sert temporairement de nom de geste.
-  const gestureName =
-    state.get('gestureName')?.trim()
-    || soundLabel;
+  //Use the custom name if you've added `gestureName`.
+  //Otherwise, the sound name is used as the gesture name for the time being.
+  const gestureName = state.get('gestureName')?.trim() || soundLabel;
 
   if (!soundLabel) {
     await state.set({
       status: 'error',
-      lastError:
-        'Impossible de préparer le geste : aucun son sélectionné.',
+      lastError: 'Impossible de préparer le geste : aucun son sélectionné.',
     });
 
     return;
@@ -1055,8 +910,7 @@ async function stopRecordingAndPreparePreview(state) {
   if (!gestureName) {
     await state.set({
       status: 'error',
-      lastError:
-        'Veuillez donner un nom au geste.',
+      lastError: 'Veuillez donner un nom au geste.',
     });
 
     return;
@@ -1065,15 +919,13 @@ async function stopRecordingAndPreparePreview(state) {
   if (!isValidExample(example)) {
     await state.set({
       status: 'ready',
-      lastError:
-        'Exemple vide ou invalide. Recommencez le geste.',
+      lastError: 'Exemple vide ou invalide. Recommencez le geste.',
     });
 
     return;
   }
 
-  const temporaryLabel =
-    `${WAITING_LABEL_PREFIX}${Date.now()}`;
+  const temporaryLabel = `${WAITING_LABEL_PREFIX}${Date.now()}`;
 
   const finalLabel = createModelLabel(
     gestureName,
@@ -1092,13 +944,12 @@ async function stopRecordingAndPreparePreview(state) {
   await state.set({
     training: true,
     status: 'preparing-preview',
-    lastMessage:
-      `Préparation du test du geste "${gestureName}"...`,
+    lastMessage: `Préparation du test du geste "${gestureName}"...`,
     lastError: '',
   });
 
 
-  // Ajout temporaire dans XMM
+  // Temporary addition in XMM
   await model.addExample(
     temporaryLabel,
     example,
@@ -1113,9 +964,7 @@ async function stopRecordingAndPreparePreview(state) {
     waitingPreview: false,
     training: false,
     status: 'waiting-validation',
-
-    lastMessage:
-      `Le geste "${gestureName}" est prêt à être testé.`,
+    lastMessage: `Le geste "${gestureName}" est prêt à être testé.`,
   });
 }
 
@@ -1125,8 +974,7 @@ async function stopRecordingAndPreparePreview(state) {
 async function validateWaitingGesture(state) {
   if (!waitingExample || !waitingInfos) {
     await state.set({
-      lastError:
-        'Aucun geste temporaire à valider.',
+      lastError: 'Aucun geste temporaire à valider.',
     });
 
     return;
@@ -1148,19 +996,18 @@ async function validateWaitingGesture(state) {
     waitingPreview: false,
     training: true,
     status: 'validating-gesture',
-    lastMessage:
-      `Validation du geste "${gestureName}"...`,
+    lastMessage: `Validation du geste "${gestureName}"...`,
     lastError: '',
   });
 
 
-  // Ajout définitif
+  // Permanent addition
   await model.addExample(
     finalLabel,
     waitingExample,
   );
 
-  // Suppression de la classe temporaire
+  // Deleting the temporary class
   await model.clearExamples(temporaryLabel);
 
   waitingExample = null;
@@ -1172,13 +1019,10 @@ async function validateWaitingGesture(state) {
     waitingGesture: null,
     waitingPreview: false,
     validateWaitingRequest: 0,
-
     gestureName: '',
     training: false,
     status: 'ready',
-
-    lastMessage:
-      `Geste "${gestureName}" associé au son "${soundLabel}".`,
+    lastMessage: `Geste "${gestureName}" associé au son "${soundLabel}".`,
   });
 }
 
@@ -1207,19 +1051,16 @@ async function cancelWaitingGesture(state) {
     waitingGesture: null,
     waitingPreview: false,
     cancelWaitingRequest: 0,
-
     training: false,
     recognizedLabel: null,
     status: 'ready',
-
-    lastMessage:
-      `Enregistrement de "${gestureName}" annulé.`,
+    lastMessage: `Enregistrement de "${gestureName}" annulé.`,
     lastError: '',
   });
 }
 
 
-
+// --------- Clear Waiting Examples ----------
 async function clearWaitingExamples() {
   if (!model) {
     return;
@@ -1305,18 +1146,13 @@ async function syncExamplesToState(state) {
     return;
   }
 
-  const infos =
-    model.state.get('infos') || {};
-
+  const infos = model.state.get('infos') || {};
   const examples = {};
 
   for (const [modelLabel, modelInfos] of Object.entries(infos)) {
 
-    // Les labels temporaires ne sont pas affichés
-    if (
-      modelLabel.startsWith(
-        WAITING_LABEL_PREFIX,
-      )
+    // Temporary labels are not displayed
+    if (modelLabel.startsWith(WAITING_LABEL_PREFIX)
     ) {
       continue;
     }
@@ -1333,9 +1169,7 @@ async function syncExamplesToState(state) {
     };
   }
 
-  await state.set({
-    examples,
-  });
+  await state.set({ examples });
 }
 
 
@@ -1364,116 +1198,153 @@ function isValidExample(example) {
 
 
 
+function wait(delayMs) {
+  return new Promise(resolve => {
+    setTimeout(
+      resolve,
+      delayMs,
+    );
+  });
+}
+
+
+async function fetchAudioBuffer(
+  url,
+  attempts = 5,
+) {
+  let lastError = null;
+
+  for (
+    let attempt = 1;
+    attempt <= attempts;
+    attempt += 1
+  ) {
+    try {
+
+      // This setting prevents a cached HTTP response from being reused.
+      const requestUrl = new URL(url);
+      requestUrl.searchParams.set('_reload', `${Date.now()}-${attempt}`);
+
+      const response = await fetch(
+        requestUrl.href,
+        { cache: 'no-store' },
+      );
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+
+      return await audioContext
+        .decodeAudioData(arrayBuffer.slice(0));
+    } catch (error) {
+      lastError = error;
+      console.warn(`Tentative ${attempt}/${attempts} ` + `de chargement audio échouée :`, error);
+
+      if (attempt < attempts) {
+        await wait(attempt * 200);
+      }
+    }
+  }
+
+  throw lastError || new Error('Impossible de charger le fichier audio.');
+}
+
+
+
 async function loadUserSounds(state) {
   if (!synth) {
     return;
   }
 
-  const userSoundFiles =
-    state.get('userSoundFiles')
-    || [];
+  const userSoundFiles = state.get('userSoundFiles') || [];
 
-  if (
-    !Array.isArray(userSoundFiles)
-  ) {
+  if (!Array.isArray(userSoundFiles)) {
     return;
+  }
+
+
+  // Current list of files present
+  // in the Filesystem plugin
+  const nextUserSoundLabels = new Set(
+    userSoundFiles.map(soundFile => {
+      return String(soundFile?.label || '').trim();
+    }).filter(Boolean),
+  );
+
+
+  // Removes user files from the synthesizer that
+  // have been deleted from the server
+  for (const label of loadedUserSoundLabels) {
+    if (!nextUserSoundLabels.has(label)) {
+      synth.removeSound(label);
+    }
   }
 
   let loadedCount = 0;
   const errors = [];
 
-  for (const soundFile of userSoundFiles) {
-    const label = String(
-      soundFile?.label || '',
-    ).trim();
 
-    const url =
-      soundFile?.url;
+  //Load the new files in the Filesystem plugin.
+  for (const soundFile of userSoundFiles) {
+    const label = String(soundFile?.label || '').trim();
+    const url = soundFile?.url;
 
     if (!label || !url) {
       continue;
     }
 
-    /*
-     * Les noms sont rendus uniques
-     * au moment de l’upload.
-     */
     if (synth.hasSound(label)) {
       continue;
     }
 
     try {
-      const response =
-        await fetch(url);
-
-      if (!response.ok) {
-        throw new Error(
-          `HTTP ${response.status}`,
-        );
-      }
-
-      const arrayBuffer =
-        await response.arrayBuffer();
-
-      const audioBuffer =
-        await audioContext
-          .decodeAudioData(
-            arrayBuffer.slice(0),
-          );
-
-      synth.addSound(
-        label,
-        audioBuffer,
-      );
+      const audioBuffer = await fetchAudioBuffer(url);
+      synth.addSound(label, audioBuffer);
 
       loadedCount += 1;
     } catch (error) {
-      console.error(
-        `Impossible de charger "${label}" :`,
-        error,
-      );
+      console.error(`Impossible de charger "${label}" :`, error);
 
       errors.push(label);
     }
   }
 
-  const nextLabels =
-    synth.labels.sort(
-      (a, b) =>
-        a.localeCompare(b),
-    );
 
-  const currentSelectedLabel =
-    state.get('selectedLabel');
+  // Save the current list so you can detect future deletions.
+  loadedUserSoundLabels = nextUserSoundLabels;
 
-  const nextSelectedLabel =
-    currentSelectedLabel
-    && nextLabels.includes(
-      currentSelectedLabel,
-    )
-      ? currentSelectedLabel
-      : nextLabels[0] || null;
+  const nextLabels = synth.labels.sort((a, b) => {
+    return a.localeCompare(b);
+  });
 
+  const currentSelectedLabel = state.get('selectedLabel');
+  const nextSelectedLabel = currentSelectedLabel && nextLabels.includes(currentSelectedLabel)
+    ? currentSelectedLabel
+    : nextLabels[0] || null;
+
+  const currentPreviewLabel = state.get('previewLabel');
+  const nextPreviewLabel = currentPreviewLabel && nextLabels.includes(currentPreviewLabel)
+    ? currentPreviewLabel
+    : null;
 
   await state.set({
     labels: nextLabels,
+    selectedLabel: nextSelectedLabel,
+    previewLabel: nextPreviewLabel,
+    status: errors.length > 0
+      ? 'sound-loading-error'
+      : 'ready',
 
-    selectedLabel:
-    nextSelectedLabel,
+    lastMessage: loadedCount > 0
+      ? `${loadedCount} nouveau(x) son(s) chargé(s).`
+      : state.get('lastMessage'),
 
-    status:
-      errors.length > 0
-        ? 'sound-loading-error'
-        : 'ready',
-
-    lastMessage:
-      loadedCount > 0
-        ? `${loadedCount} nouveau(x) son(s) chargé(s).`
-        : state.get('lastMessage'),
-
-    lastError:
-      errors.length > 0
-        ? `Impossible de charger : ${errors.join(', ')}`
-        : '',
+    lastError: errors.length > 0
+      ? `Impossible de charger : ${errors.join(', ')}`
+      : '',
   });
 }
+
+

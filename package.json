@@ -17,11 +17,12 @@
     "watch:sass": "sass --watch src/styles:.build/public/css"
   },
   "dependencies": {
-    "@ircam/como": "^2.0.0-beta.0",
+    "@ircam/como": "^2.0.0-beta.15",
     "@ircam/sc-components": "^3.5.0",
     "@ircam/sc-loader": "^1.1.0",
+    "@ircam/sc-motion": "^2.3.0",
     "@ircam/sc-scheduling": "^1.0.0",
-    "@ircam/sc-signal": "^1.2.0",
+    "@ircam/sc-signal": "^1.3.0",
     "@soundworks/core": "^5.4.1",
     "@soundworks/helpers": "^5.0.4",
     "lit": "^3.1.3"
@@ -35,8 +36,5 @@
     "concurrently": "^9.2.1",
     "eslint": "^9.18.0",
     "sass": "^1.77.1"
-  },
-  "overrides": {
-    "node-web-audio-api": "1.0.9"
   }
 }

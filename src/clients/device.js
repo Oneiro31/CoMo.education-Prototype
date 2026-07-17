@@ -22,23 +22,6 @@ async function bootstrap() {
   await como.start();
 
 
- /* const comote = await como.sourceManager.createSource({
-    type: 'comote',
-    id: '0',
-    port: OSC_PORT,
-    verbose: false,
-  });
-
-
-  const playerId = como.playerManager.playerExists(APP_PLAYER_ID)
-    ? APP_PLAYER_ID
-    : await como.playerManager.createPlayer(comote, {
-      id: APP_PLAYER_ID,
-    });
-
-  const player = await como.playerManager.getPlayer(playerId);*/
-
-
   const lsm9ds1 = await como.sourceManager.createSource({
     type: 'lsm9ds1',
     id: '1',
@@ -49,9 +32,7 @@ async function bootstrap() {
 
   const playerId = como.playerManager.playerExists(APP_PLAYER_ID)
     ? APP_PLAYER_ID
-    : await como.playerManager.createPlayer(lsm9ds1, {
-      id: APP_PLAYER_ID,
-    });
+    : await como.playerManager.createPlayer(lsm9ds1, { id: APP_PLAYER_ID });
 
   const player = await como.playerManager.getPlayer(playerId);
 

@@ -2,7 +2,6 @@ import '@soundworks/helpers/polyfills.js';
 import { Client } from '@soundworks/core/client.js';
 import { loadConfig, launcher } from '@soundworks/helpers/browser.js';
 import { html, render, nothing } from 'lit';
-
 import ComoClient from '@ircam/como/ComoClient.js';
 
 import '@ircam/sc-components/sc-icon.js';
@@ -17,8 +16,8 @@ import '@ircam/sc-components/sc-dragndrop.js';
 
 const APP_PLAYER_ID = 'gesture-player';
 const APP_SCRIPT_NAME = 'gesture-sound.js';
-
 const AUDIO_FILE_EXTENSION = /\.(wav|mp3|ogg|m4a|aac|flac|aif|aiff)$/i;
+
 
 
 function isAudioFile(file) {
@@ -28,9 +27,7 @@ function isAudioFile(file) {
 
   return (
     file.type.startsWith('audio/')
-    || AUDIO_FILE_EXTENSION.test(
-      file.name,
-    )
+    || AUDIO_FILE_EXTENSION.test(file.name)
   );
 }
 
@@ -59,18 +56,25 @@ async function main($container) {
 
 
   userSoundbankFilesystem.onUpdate(
+
     (tree, events) => {
-      console.log('[Filesystem] Arbre actualisé :', events);
+      console.log('Arbre actualisé :', events);
 
+      const status = scriptState?.get('status');
+      const filesystemOperationInProgress = status === 'deleting-sound' || status === 'uploading-sounds';
 
-      // On utilise directement le nouvel arbre
-      // transmis par le plugin.
+      if (filesystemOperationInProgress) {
+        renderApp();
+        return;
+      }
+
       void syncUserSoundbankToScript(tree)
         .catch(error => {
           console.error('Erreur de synchronisation de la soundbank :', error);
         });
 
       renderApp();
+
     },
     true,
   );
@@ -325,18 +329,14 @@ async function main($container) {
 
       const isAudioFileNode =
         node.type === 'file'
-        && AUDIO_FILE_EXTENSION.test(
-          nodeName || pathname,
-        );
+        && AUDIO_FILE_EXTENSION.test(nodeName || pathname);
 
       if (isAudioFileNode) {
         entries.push({
-          label:
-            nodeName
-            || pathname
-              .replaceAll('\\', '/')
-              .split('/')
-              .pop(),
+          label: nodeName || pathname
+            .replaceAll('\\', '/')
+            .split('/')
+            .pop(),
 
           pathname,
 
@@ -378,23 +378,15 @@ async function main($container) {
         .map(soundFile => {
           return {
             label: soundFile.label,
-
             pathname: soundFile.pathname,
-
-            url:
-            new URL(
+            url: new URL(
               soundFile.url,
               window.location.origin,
             ).href,
           };
         });
 
-    const currentReloadRequest =
-      Number(
-        scriptState.get(
-          'reloadUserSoundsRequest',
-        ),
-      ) || 0;
+    const currentReloadRequest = Number(scriptState.get('reloadUserSoundsRequest')) || 0;
 
     console.log('[Filesystem] Synchronisation :', userSoundFiles);
 
@@ -438,19 +430,16 @@ async function main($container) {
 
           const entries = getAudioFilesystemEntries(tree);
 
-          const availableFilenames =
-            new Set(
-              entries.map(entry => {
-                return entry.label;
-              }),
-            );
+          const availableFilenames = new Set(
+            entries.map(entry => {
+              return entry.label;
+            }),
+          );
 
           const allFilesArePresent =
             [...expectedFilenames].every(
               filename => {
-                return availableFilenames.has(
-                  filename,
-                );
+                return availableFilenames.has(filename);
               },
             );
 
@@ -461,12 +450,12 @@ async function main($container) {
           }
         }
 
-        unsubscribe =
-          userSoundbankFilesystem.onUpdate(
-            tree => {
-              checkTree(tree);
-            },
-          );
+        unsubscribe = userSoundbankFilesystem.onUpdate(
+          tree => {
+            checkTree(tree);
+          },
+
+        );
 
         timeout = setTimeout(
           () => {
@@ -487,14 +476,10 @@ async function main($container) {
           timeoutMs,
         );
 
-
-        checkTree(
-          userSoundbankFilesystem.getTree(),
-        );
+        checkTree(userSoundbankFilesystem.getTree());
       },
     );
   }
-
 
 
 
@@ -506,12 +491,11 @@ async function main($container) {
 
     const record = scriptState.get('record');
     const training = scriptState.get('training');
-    const waitingGesture = scriptState.get('waitingGesture',);
+    const waitingGesture = scriptState.get('waitingGesture');
 
     if (record || training || waitingGesture) {
       await scriptState.set({
-        lastError: 'Terminez l’enregistrement en cours '
-          + 'avant d’importer un son.',
+        lastError: 'Terminez l’enregistrement en cours ' + 'avant d’importer un son.',
       });
 
       return;
@@ -522,8 +506,7 @@ async function main($container) {
 
     if (audioFiles.length === 0) {
       await scriptState.set({
-        lastError: 'Aucun fichier audio valide '
-          + 'n’a été déposé.',
+        lastError: 'Aucun fichier audio valide ' + 'n’a été déposé.',
       });
 
       return;
@@ -554,12 +537,12 @@ async function main($container) {
         importedFilenames.push(filename);
       }
 
-      //On attend que l’arbre du client contienne
-      // réellement tous les nouveaux fichiers.
+      // We expect the client's tree to
+      // actually contain all the new files.
       const updatedTree = await waitForImportedFiles(importedFilenames);
 
-      // On transmet directement cet arbre actualisé.
-      await syncUserSoundbankToScript(updatedTree,);
+      // We are sending this updated tree directly
+      await syncUserSoundbankToScript(updatedTree);
 
       await scriptState.set({
         status: 'ready',
@@ -570,10 +553,7 @@ async function main($container) {
         lastError: '',
       });
     } catch (error) {
-      console.error(
-        'Erreur d’import audio :',
-        error,
-      );
+      console.error('Erreur d’import audio :', error);
 
       await scriptState.set({
         status: 'error',
@@ -646,7 +626,7 @@ async function main($container) {
     }
 
     try {
-      //On récupère directement le nœud du plugin et son relPath exact.
+      // We retrieve the plugin node and its exact relPath directly
       const soundEntry = findSoundEntry(label);
 
       if (!soundEntry) {
@@ -671,7 +651,7 @@ async function main($container) {
         previewLabel: null,
       });
 
-      console.log('[Filesystem] Suppression demandée :',
+      console.log('Suppression demandée :',
         { label,
           pathname,
           soundEntry,
@@ -679,18 +659,25 @@ async function main($container) {
       );
 
 
-      //Suppression définitive effectuée
       await userSoundbankFilesystem.rm(pathname);
-      await syncUserSoundbankToScript();
 
+
+      // A short wait to allow the filesystem plugin to stabilize its tree after deletion.
+      await new Promise(resolve => {
+        setTimeout(resolve, 100);
+      });
+
+      // Permanent deletion completed
+      await syncUserSoundbankToScript(userSoundbankFilesystem.getTree());
       await scriptState.set({
         status: 'ready',
         lastMessage: `Son supprimé définitivement : "${label}".`,
         lastError: '',
+
       });
     } catch (error) {
 
-      console.error('[Filesystem] Erreur de suppression :', error);
+      console.error('Erreur de suppression :', error);
 
       await scriptState.set({
         status: 'error',
@@ -733,6 +720,7 @@ async function main($container) {
 
     const waitingGesture = scriptState.get('waitingGesture');
     const waitingPreview = scriptState.get('waitingPreview');
+    const status = scriptState.get('status');
 
 
     const gestureRows = Object.entries(examples).flatMap(
@@ -1047,9 +1035,12 @@ async function main($container) {
                 @click=${toggleRecord}
                 ?disabled=${!selectedLabel || !gestureName.trim () ||training || waitingGesture || mode !== 'learn'}
               >
-                ${record
-                  ? 'Arreter'
-                  : 'Enregistrer'
+
+                ${status === 'record-countdown'
+                  ? 'Annuler'
+                  : record
+                    ? 'Arrêter'
+                    : 'Enregistrer'
                 }
               </button>
 
@@ -1558,7 +1549,6 @@ async function main($container) {
         }
 
 
-
         /* ---- Listen / Stop Button---- */
         button.listen-button {
           border-color: var(--white-border);
@@ -1661,7 +1651,7 @@ async function main($container) {
         }
 
 
-        
+
         /* ------------ Gesture Name ------------- */
         .gesture-name-control {
           display: flex;

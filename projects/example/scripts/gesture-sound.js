@@ -1,12 +1,59 @@
 import { Intensity } from '@ircam/sc-motion/Intensity.js';
 import { CategoricalHysteresis } from '@ircam/sc-signal/CategoricalHysteresis.js';
-import { GestureSoundSynth } from './gesture-sound/GestureSoundSynth.js';
+import { GestureSoundSynth } from '../../../src/utils/GestureSoundSynth.js';
 
 
 const {
   audioContext,
   como,
 } = getGlobalScriptingContext();
+
+
+
+const MODEL_ID = 'gesture-sound_short';
+const MODEL_PRESET = 'shortGestures';
+const FRAME_TIMEOUT_MS = 500;
+const FRAME_TIMEOUT_INTERVAL_MS = 200;
+const WAITING_LABEL_PREFIX = '__waiting__:';
+const MODEL_LABEL_SEPARATOR = '|||';
+
+
+
+const COUNTDOWN_SOUND_URL = 'http://192.168.1.60:8000/assets/Voice-record.wav';
+const COUNTDOWN_SOUND_LABEL = 'Voice-record.wav';
+const RECORD_COUNTDOWN_DELAY_MS = 4000; // On lance l'enregistrement 4 secondes après le clic.
+const RECORDING_DURATION_MS = 4000; // L'enregistrement réel dure exactement 4 secondes.
+
+
+// Intensity Parameters
+const INTENSITY_WINDOW_SIZE = 3;
+const INTENSITY_FEEDBACK = 0.7;
+const INTENSITY_PROCESS_GAIN = 0.07;
+
+// Categorical buffer size
+const HYSTERESIS_BUFFER_SIZE = 15;
+
+
+let model = null;
+let synth = null;
+let recordExample = null;
+let unsubscribeState = null;
+let unsubscribeModel = null;
+let lastClearAllRequest = 0;
+let frameTimeoutInterval = null;
+let lastFrameTime = 0;
+let waitingExample = null;
+let waitingInfos = null;
+let recordingInfos = null;
+let recordCountdownTimeout = null;
+let recordStopTimeout = null;
+let countdownAudioBuffer = null;
+let intensityProcessor = null;
+let previewHysteresis= null;
+let playHysteresis= null;
+let loadedUserSoundLabels = new Set();
+
+
 
 
 // -------- Share State ----------
@@ -131,40 +178,6 @@ export async function defineSharedState() {
 }
 
 
-const MODEL_ID = 'gesture-sound_short';
-const MODEL_PRESET = 'shortGestures';
-const FRAME_TIMEOUT_MS = 500;
-const FRAME_TIMEOUT_INTERVAL_MS = 200;
-const WAITING_LABEL_PREFIX = '__waiting__:';
-const MODEL_LABEL_SEPARATOR = '|||';
-
-
-// Intensity Parameters
-const INTENSITY_WINDOW_SIZE = 3;
-const INTENSITY_FEEDBACK = 0.7;
-const INTENSITY_PROCESS_GAIN = 0.07;
-
-// Categorical buffer size
-const HYSTERESIS_BUFFER_SIZE = 15;
-
-
-let model = null;
-let synth = null;
-let recordExample = null;
-let unsubscribeState = null;
-let unsubscribeModel = null;
-let lastClearAllRequest = 0;
-let frameTimeoutInterval = null;
-let lastFrameTime = 0;
-let waitingExample = null;
-let waitingInfos = null;
-let recordingInfos = null;
-let intensityProcessor = null;
-let previewHysteresis= null;
-let playHysteresis= null;
-let loadedUserSoundLabels = new Set();
-
-
 
 // --------------- Enter () ----------------
 export async function enter(context) {
@@ -196,6 +209,20 @@ export async function enter(context) {
     soundbank,
     output,
   });
+
+
+  try {
+    countdownAudioBuffer = await fetchAudioBuffer(COUNTDOWN_SOUND_URL);
+
+  } catch (error) {
+    console.warn(
+      `Impossible de charger le son de décompte : ${COUNTDOWN_SOUND_URL}`,
+      error,
+    );
+
+    countdownAudioBuffer = null;
+  }
+
 
   lastFrameTime = performance.now();
 
@@ -343,9 +370,9 @@ export async function enter(context) {
 
       if ('record' in updates) {
         if (updates.record === true) {
-          await startRecording(state);
+          await startRecordingSequence(state);
         } else {
-          await stopRecordingAndPreparePreview(state);
+          await stopRecordingSequence(state);
         }
       }
 
@@ -447,10 +474,13 @@ export async function enter(context) {
 
 // -------------- Exit () ------------------
 export async function exit() {
+  clearRecordingTimers();
+
   if (unsubscribeState) {
     unsubscribeState();
     unsubscribeState = null;
   }
+
 
   if (unsubscribeModel) {
     unsubscribeModel();
@@ -654,15 +684,11 @@ export async function process(context, frame) {
 
       const score = Number(scores[index]);
 
-      if (
-        Number.isFinite(score)
-        && score > previewWinnerScore
-      ) {
+      if (Number.isFinite(score) && score > previewWinnerScore) {
         previewWinnerLabel = label;
         previewWinnerScore = score;
       }
     });
-
 
     // A preview gesture is recognized only
     // if it is the best result produced by XMM
@@ -716,7 +742,6 @@ export async function process(context, frame) {
 
     return;
   }
-
 
 
 
@@ -826,26 +851,47 @@ function parseModelLabel(modelLabel) {
 
 
 
-// ------- Start Recording --------
-async function startRecording(state) {
+
+function clearRecordingTimers() {
+
+  if (recordCountdownTimeout) {
+    clearTimeout(recordCountdownTimeout);
+    recordCountdownTimeout = null;
+  }
+
+  if (recordStopTimeout) {
+    clearTimeout(recordStopTimeout);
+    recordStopTimeout = null;
+  }
+
+}
+
+
+async function startRecordingSequence(state) {
+
+  clearRecordingTimers();
+
   const soundLabel = state.get('selectedLabel');
-  const gestureName= state.get('gestureName')?.trim();
+  const gestureName = state.get('gestureName')?.trim();
 
   if (!soundLabel) {
+
     recordExample = null;
-    recordingInfos= null;
+    recordingInfos = null;
 
     await state.set({
       record: false,
       status: 'error',
       lastError: 'Aucun son sélectionné pour enregistrer le geste.',
+
     });
 
     return;
+
   }
 
-
   if (!gestureName) {
+
     recordExample = null;
     recordingInfos = null;
 
@@ -853,9 +899,11 @@ async function startRecording(state) {
       record: false,
       status: 'error',
       lastError: 'Veuillez donner un nom au geste avant de commencer.',
+
     });
 
     return;
+
   }
 
   const modelLabel = createModelLabel(
@@ -867,17 +915,158 @@ async function startRecording(state) {
     gestureName,
     soundLabel,
     modelLabel,
+
   };
 
-  recordExample = [];
+  // Très important :
+  // on garde record = true pour bloquer l'interface,
+  // mais on ne crée pas encore recordExample.
+  // Donc aucune frame n'est encore enregistrée.
 
+  recordExample = null;
+
+  synth?.stopAll({
+    fade: true,
+    fadeOutTime: 0.1,
+
+  });
+
+  const countdownChannel = synth?.playBuffer(countdownAudioBuffer, {
+    gain: 1,
+  });
+
+  await state.set({
+
+    mode: 'learn',
+    training: false,
+    recognizedLabel: null,
+    waitingPreview: false,
+    status: 'record-countdown',
+
+    lastMessage:
+      `Préparez-vous : enregistrement du geste "${gestureName}" `
+      + `pour le son "${soundLabel}" dans 3 secondes...`,
+
+    lastError: countdownChannel
+      ? ''
+      : `Son de décompte introuvable : "${COUNTDOWN_SOUND_LABEL}". `
+      + 'L’enregistrement commencera quand même.',
+
+  });
+
+  recordCountdownTimeout = setTimeout(() => {
+
+    recordCountdownTimeout = null;
+
+    void beginTimedRecording(state)
+      .catch(async error => {
+        console.error('Erreur pendant le démarrage différé :', error);
+
+        await state.set({
+          record: false,
+          training: false,
+          status: 'error',
+          lastError: error?.message || String(error),
+        });
+      });
+
+  }, RECORD_COUNTDOWN_DELAY_MS);
+
+}
+
+
+
+async function beginTimedRecording(state) {
+  if (!state.get('record')) {
+    return;
+  }
+
+  if (!recordingInfos) {
+    await state.set({
+      record: false,
+      status: 'error',
+      lastError: 'Impossible de démarrer l’enregistrement : informations manquantes.',
+    });
+
+    return;
+  }
+
+  await startRecording(state);
+
+  recordStopTimeout = setTimeout(() => {
+    recordStopTimeout = null;
+
+    void state.set({
+      record: false,
+    }).catch(error => {
+      console.error('Erreur pendant l’arrêt automatique :', error);
+    });
+  }, RECORDING_DURATION_MS);
+}
+
+
+async function stopRecordingSequence(state) {
+  clearRecordingTimers();
+
+  // Cas 1 :
+  // l'utilisateur annule pendant le décompte.
+  // Dans ce cas recordExample n'existe pas encore.
+  if (!recordExample) {
+    recordingInfos = null;
+
+    synth?.stopAll({
+      fade: true,
+      fadeOutTime: 0.1,
+    });
+
+    await state.set({
+      status: 'ready',
+      lastMessage: 'Enregistrement annulé.',
+      lastError: '',
+    });
+
+    return;
+  }
+
+  // Cas 2 :
+  // l'enregistrement réel a commencé.
+  // On utilise alors la logique existante.
+  await stopRecordingAndPreparePreview(state);
+}
+
+
+
+
+// ------- Start Recording --------
+async function startRecording(state) {
+  if (!recordingInfos) {
+    recordExample = null;
+
+    await state.set({
+      record: false,
+      status: 'error',
+      lastError: 'Impossible de démarrer l’enregistrement : informations manquantes.',
+    });
+
+    return;
+  }
+
+  const {
+    gestureName,
+    soundLabel,
+  } = recordingInfos;
+
+  recordExample = [];
 
   await state.set({
     mode: 'learn',
     training: false,
     recognizedLabel: null,
     status: 'recording',
-    lastMessage: `Enregistrement du geste "${gestureName}" pour le son "${soundLabel}"...`,
+    lastMessage:
+      `Enregistrement du geste "${gestureName}" `
+      + `pour le son "${soundLabel}" pendant 3 secondes...`,
+
     lastError: '',
   });
 }
@@ -887,16 +1076,39 @@ async function startRecording(state) {
 // ------- Stop Recording and Train --------
 async function stopRecordingAndPreparePreview(state) {
   if (!recordExample) {
+
     return;
+
   }
 
   const example = recordExample;
-  recordExample = null;
-  const soundLabel = state.get('selectedLabel');
+  const infos = recordingInfos;
 
   //Use the custom name if you've added `gestureName`.
   //Otherwise, the sound name is used as the gesture name for the time being.
-  const gestureName = state.get('gestureName')?.trim() || soundLabel;
+  //const gestureName = state.get('gestureName')?.trim() || soundLabel;
+
+  recordExample = null;
+  recordingInfos = null;
+
+  if (!infos) {
+
+    await state.set({
+      status: 'error',
+      lastError: 'Impossible de préparer le geste : informations manquantes.',
+    });
+
+    return;
+
+  }
+
+  const {
+    gestureName,
+    soundLabel,
+    modelLabel,
+  } = infos;
+
+
 
   if (!soundLabel) {
     await state.set({
@@ -927,10 +1139,7 @@ async function stopRecordingAndPreparePreview(state) {
 
   const temporaryLabel = `${WAITING_LABEL_PREFIX}${Date.now()}`;
 
-  const finalLabel = createModelLabel(
-    gestureName,
-    soundLabel,
-  );
+  const finalLabel = modelLabel;
 
   waitingExample = example;
 
@@ -1208,47 +1417,18 @@ function wait(delayMs) {
 }
 
 
-async function fetchAudioBuffer(
-  url,
-  attempts = 5,
-) {
-  let lastError = null;
+async function fetchAudioBuffer(url) {
+  const response = await fetch(url, {
+    cache: 'no-store',
+  });
 
-  for (
-    let attempt = 1;
-    attempt <= attempts;
-    attempt += 1
-  ) {
-    try {
-
-      // This setting prevents a cached HTTP response from being reused.
-      const requestUrl = new URL(url);
-      requestUrl.searchParams.set('_reload', `${Date.now()}-${attempt}`);
-
-      const response = await fetch(
-        requestUrl.href,
-        { cache: 'no-store' },
-      );
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const arrayBuffer = await response.arrayBuffer();
-
-      return await audioContext
-        .decodeAudioData(arrayBuffer.slice(0));
-    } catch (error) {
-      lastError = error;
-      console.warn(`Tentative ${attempt}/${attempts} ` + `de chargement audio échouée :`, error);
-
-      if (attempt < attempts) {
-        await wait(attempt * 200);
-      }
-    }
+  if (!response.ok) {
+    throw new Error(`Impossible de charger le fichier audio : HTTP ${response.status}`);
   }
 
-  throw lastError || new Error('Impossible de charger le fichier audio.');
+  const arrayBuffer = await response.arrayBuffer();
+
+  return await audioContext.decodeAudioData(arrayBuffer.slice(0));
 }
 
 

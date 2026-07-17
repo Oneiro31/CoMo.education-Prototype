@@ -355,4 +355,54 @@ export class GestureSoundSynth {
   }
 
 
+  // ------ Play files out the soundbank ------
+  playBuffer(audioBuffer, options = {}) {
+    const {
+      gain = 1,
+      when = this.audioContext.currentTime,
+      onEnded = null,
+    } = options;
+
+    if (!audioBuffer) {
+      return null;
+    }
+
+    const src = new AudioBufferSourceNode(this.audioContext, {
+      buffer: audioBuffer,
+      loop: false,
+    });
+
+    const amplitude = new GainNode(this.audioContext, {
+      gain,
+    });
+
+    src.connect(amplitude).connect(this.master);
+
+    const channel = {
+      label: '__internal_buffer__',
+      src,
+      amplitude,
+    };
+
+    this.activeSources.add(channel);
+
+    src.onended = () => {
+      this.activeSources.delete(channel);
+
+      try {
+        src.disconnect();
+        amplitude.disconnect();
+      } catch (err) {}
+
+      if (typeof onEnded === 'function') {
+        onEnded(channel);
+      }
+    };
+
+    src.start(when);
+    return channel;
+  }
+
+
+
 }

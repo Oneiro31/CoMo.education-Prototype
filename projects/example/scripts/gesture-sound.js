@@ -18,11 +18,10 @@ const WAITING_LABEL_PREFIX = '__waiting__:';
 const MODEL_LABEL_SEPARATOR = '|||';
 
 
-
 const COUNTDOWN_SOUND_URL = 'http://192.168.1.60:8000/assets/Voice-record.wav';
 const COUNTDOWN_SOUND_LABEL = 'Voice-record.wav';
-const RECORD_COUNTDOWN_DELAY_MS = 4000; // On lance l'enregistrement 4 secondes après le clic.
-const RECORDING_DURATION_MS = 4000; // L'enregistrement réel dure exactement 4 secondes.
+const RECORD_COUNTDOWN_DELAY_MS = 4000; // Recording starts 4 seconds after the countdown
+const RECORDING_DURATION_MS = 4000; // The recording lasts exactly 4 seconds
 
 
 // Intensity Parameters
@@ -36,7 +35,7 @@ const HYSTERESIS_BUFFER_SIZE = 15;
 
 let model = null;
 let synth = null;
-let recordExample = null;
+
 let unsubscribeState = null;
 let unsubscribeModel = null;
 let lastClearAllRequest = 0;
@@ -44,10 +43,13 @@ let frameTimeoutInterval = null;
 let lastFrameTime = 0;
 let waitingExample = null;
 let waitingInfos = null;
+
+let recordExample = null;
 let recordingInfos = null;
 let recordCountdownTimeout = null;
 let recordStopTimeout = null;
 let countdownAudioBuffer = null;
+
 let intensityProcessor = null;
 let previewHysteresis= null;
 let playHysteresis= null;
@@ -194,7 +196,6 @@ export async function enter(context) {
     gain: INTENSITY_PROCESS_GAIN,
   });
 
-
   previewHysteresis = new CategoricalHysteresis({
     bufferSize: HYSTERESIS_BUFFER_SIZE,
   });
@@ -202,7 +203,6 @@ export async function enter(context) {
   playHysteresis = new CategoricalHysteresis({
     bufferSize: HYSTERESIS_BUFFER_SIZE,
   });
-
 
   synth = new GestureSoundSynth({
     audioContext,
@@ -253,7 +253,6 @@ export async function enter(context) {
 
 
   const labels = Object.keys(soundbank);
-
 
   await state.set({
     labels,
@@ -467,7 +466,6 @@ export async function enter(context) {
     lastMessage: 'Application prête.',
   });
 }
-// ----------------------------------------
 
 
 
@@ -522,7 +520,7 @@ export async function exit() {
   loadedUserSoundLabels.clear();
 
 }
-// --------------------------------------
+
 
 
 
@@ -651,7 +649,6 @@ export async function process(context, frame) {
   }
 
 
-
   // ----------- Preview Recognition -----------
   if (isWaitingPreview) {
     if (!waitingInfos) {
@@ -690,8 +687,6 @@ export async function process(context, frame) {
       }
     });
 
-    // A preview gesture is recognized only
-    // if it is the best result produced by XMM
 
     // Temporal stabilization of the result
     let stabilizedPreviewLabel = null;
@@ -742,7 +737,6 @@ export async function process(context, frame) {
 
     return;
   }
-
 
 
   // --------- Play Recognition ------------
@@ -819,7 +813,7 @@ export async function process(context, frame) {
     });
   }
 }
-// ----------------------------------------
+
 
 
 
@@ -851,7 +845,6 @@ function parseModelLabel(modelLabel) {
 
 
 
-
 function clearRecordingTimers() {
 
   if (recordCountdownTimeout) {
@@ -867,6 +860,8 @@ function clearRecordingTimers() {
 }
 
 
+
+// -------- Star Recording Sequence: Countdown + Timed Recording ------------
 async function startRecordingSequence(state) {
 
   clearRecordingTimers();
@@ -918,11 +913,8 @@ async function startRecordingSequence(state) {
 
   };
 
-  // Très important :
-  // on garde record = true pour bloquer l'interface,
-  // mais on ne crée pas encore recordExample.
-  // Donc aucune frame n'est encore enregistrée.
 
+  // No frames have been recorded yet
   recordExample = null;
 
   synth?.stopAll({
@@ -975,7 +967,7 @@ async function startRecordingSequence(state) {
 }
 
 
-
+// ------- Begin Timed Recording --------
 async function beginTimedRecording(state) {
   if (!state.get('record')) {
     return;
@@ -1005,12 +997,11 @@ async function beginTimedRecording(state) {
 }
 
 
+// ------------ Stop Recording Sequence  --------------
 async function stopRecordingSequence(state) {
   clearRecordingTimers();
 
-  // Cas 1 :
-  // l'utilisateur annule pendant le décompte.
-  // Dans ce cas recordExample n'existe pas encore.
+  // Case where the user cancels during the countdown
   if (!recordExample) {
     recordingInfos = null;
 
@@ -1028,12 +1019,9 @@ async function stopRecordingSequence(state) {
     return;
   }
 
-  // Cas 2 :
-  // l'enregistrement réel a commencé.
-  // On utilise alors la logique existante.
+  // Cases where actual recording has begun
   await stopRecordingAndPreparePreview(state);
 }
-
 
 
 
@@ -1073,7 +1061,7 @@ async function startRecording(state) {
 
 
 
-// ------- Stop Recording and Train --------
+// ------- Stop Recording and Prepare Preview --------
 async function stopRecordingAndPreparePreview(state) {
   if (!recordExample) {
 
@@ -1084,9 +1072,6 @@ async function stopRecordingAndPreparePreview(state) {
   const example = recordExample;
   const infos = recordingInfos;
 
-  //Use the custom name if you've added `gestureName`.
-  //Otherwise, the sound name is used as the gesture name for the time being.
-  //const gestureName = state.get('gestureName')?.trim() || soundLabel;
 
   recordExample = null;
   recordingInfos = null;
@@ -1407,16 +1392,8 @@ function isValidExample(example) {
 
 
 
-function wait(delayMs) {
-  return new Promise(resolve => {
-    setTimeout(
-      resolve,
-      delayMs,
-    );
-  });
-}
 
-
+// --------- Fetch Audio Buffer -------------
 async function fetchAudioBuffer(url) {
   const response = await fetch(url, {
     cache: 'no-store',
@@ -1433,6 +1410,7 @@ async function fetchAudioBuffer(url) {
 
 
 
+// --------- Load User Sounds -------------
 async function loadUserSounds(state) {
   if (!synth) {
     return;

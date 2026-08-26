@@ -19,7 +19,6 @@ const APP_SCRIPT_NAME = 'gesture-sound.js';
 const AUDIO_FILE_EXTENSION = /\.(wav|mp3|ogg|m4a|aac|flac|aif|aiff)$/i;
 
 
-
 function isAudioFile(file) {
   if (!(file instanceof File)) {
     return false;
@@ -1786,6 +1785,22 @@ async function main($container) {
           padding: 12px;
           margin: 16px 0;
           font-size: 1.0rem;
+        }
+
+
+
+        /* ------------ Adjusts the interface to the screen size  ------------- */
+        .app-grid {
+          display: flex;
+          flex-wrap: wrap;
+        }
+
+        .scroller {
+          flex: 3 1 650px;
+        }
+
+        .right-column {
+          flex: 2 1 400px;
         }
 
 

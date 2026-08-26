@@ -1,8 +1,8 @@
 
 // To convert intensity.norm to audio gain
 const INTENSITY_AUDIO_MIN_GAIN = 0;
-const INTENSITY_AUDIO_MAX_GAIN = 1.2;
-const INTENSITY_AUDIO_SCALE = 0.7;
+const INTENSITY_AUDIO_MAX_GAIN = 1.4;
+const INTENSITY_AUDIO_SCALE = 0.6;
 const INTENSITY_AUDIO_SMOOTHING = 0.04;
 
 // -------- Audio Synthesis  -------------------

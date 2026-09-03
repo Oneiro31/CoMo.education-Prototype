@@ -1,121 +1,245 @@
-# `como-health`
 
-Thanks for using soundworks!
+# CoMo.education — Interactive Gesture-to-Sound Prototype
 
-## Links / Resources
+This repository contains a prototype of the **CoMo.education** application, developed using the [CoMo](https://github.com/ircam-ismm/como) and [Soundworks](https://soundworks.dev/) web frameworks.
 
-- [General Documentation / Tutorials](https://soundworks.dev/)
-- [API](https://soundworks.dev/api)
-- [Examples](https://github.com/collective-soundworks/soundworks-examples)
-- [Issue Tracker](https://github.com/collective-soundworks/soundworks/issues)
-- [Working with Max/MSP](https://github.com/collective-soundworks/soundworks-max)
+The application allows users to record gesture examples, associate them with sounds, and recognize performed gestures in order to trigger the corresponding sounds. It is intended for experimenting with gesture-based and sound-based storytelling activities, particularly in educational contexts involving young children.
 
-## Soundworks wizard
+## Main Features
 
-The soundworks wizard is a interactive command line tool that gives you access to a bunch of high-level routines, such as:
+- selection of sounds from a soundbank;
+- import of custom audio files;
+- recording of gesture examples;
+- testing and validation of a gesture before adding it to the model;
+- gesture learning and recognition using XMM;
+- local sound triggering and playback on the embedded device;
+- sound level modulation according to movement intensity;
+- deletion of individual examples or all recorded gestures;
+- application control through a web interface.
 
-- Create and configure new clients
-- Install / uninstall plugins and related libraries
-- Find some documentation
-- Create environment config files
-- etc.
+## General Architecture
+
+The application runs on two machines connected to the same local network:
+
+- a computer running the Soundworks server and the `teacher` web interface;
+- a device running the Node.js `device` client, such as a Raspberry Pi.
+
+The `device` client receives the motion data, performs gesture recognition, and generates the sound. The `teacher` interface is used to configure the associations between gestures and sounds.
+
+The application is primarily designed for use with an LSM9DS1 inertial sensor connected directly to a Raspberry Pi via I²C, but it can also be used with other sources of motion supported by the CoMo framework (e.g. CoMote and R-IoT)
+
+## Requirements
+
+### Software
+
+- Node.js;
+- npm;
+- a web browser;
+
+### Hardware
+
+Assuming that the embedded device is the primary system used:
+
+- a computer running the server and displaying the web interface;
+- a Raspberry Pi running the `device` client;
+- an LSM9DS1 inertial sensor;
+- a battery and an audio playback system;
+
+All machines must be connected to the same local network.
+
+
+## Installation
+
+Clone the repository:
 
 ```bash
-npx soundworks
+git clone git@github.com:Oneiro31/CoMo.education---Prototype-.git
+cd CoMo.education---Prototype-
 ```
 
-## Available npm scripts
+Install the dependencies:
 
-### `npm run dev`
+```bash
+npm install
+```
 
-Launch the application in development mode. Watch file system, compile and/or bundle files on change, and restart the server when needed.
 
-### `npm run build`
+## Network Configuration
 
-Build the application. Compile and bundle the sources without launching the server.
+The main network configuration is located in:
 
-### `npm run start`
+```text
+config/env-default.yaml
+```
 
-Launch the server without building the application. Basically a shortcut for `node ./.build/server/index.js`.
+Set `serverAddress` to the IP address of the computer running the Soundworks server:
 
-### `npm run watch [name]` _(node clients only)_
+```yaml
+type: development
+port: 8000
+serverAddress: '192.168.1.86'
+useHttps: false
 
-Launch the `[name]` client and restart when the sources are updated. 
+httpsInfos:
+  cert: null
+  key: null
 
-For example, if you are developing an application with a node client, you should run the `dev` script (to build the sources and start the server) in one terminal:
+baseUrl: ''
+
+auth:
+  clients: []
+  login: ''
+  password: ''
+```
+
+The address specified in `serverAddress` must be reachable from the machine running the server.
+
+If the server IP address changes:
+
+1. update the value of `serverAddress`;
+2. restart the server;
+3. restart the `device` client.
+
+
+
+
+## Modify the LSM9DS1 source
+
+The motion source used by the prototype is defined in:
+
+```text
+src/clients/device.js
+```
+
+The creation and modification parameters the LSM9DS1 source :
+
+```js
+  const lsm9ds1 = await como.sourceManager.createSource({
+    type: 'lsm9ds1',
+    id: '1',
+    interval: 10,
+    verbose: false,
+});
+```
+
+
+
+## Running the Application
+
+### 1. Start the Server
+
+From the main computer, run:
 
 ```bash
 npm run dev
 ```
 
-And launch and watch the node client(s) (e.g. called `thing`) in another terminal. The client will automatically restart when the sources are re-compiled by the `dev` script:
+This command builds the application, starts the Soundworks server, and watches the source files for changes.
+
+### 2. Start the `device` Client
+
+In a second terminal, on the machine receiving the motion data and generating the sound, run:
 
 ```bash
-npm run watch thing
+npm run watch device
 ```
 
-## Configuring the build
+When the client has started successfully, the terminal should display a message similar to:
 
-Browser clients are compiled using [swc](https://swc.rs/). By default, builds are made with the `es2022` target which supports a number of modern JavaScript features.
-
-If you need to support older browsers, you can configure the build in the `.swcrc` file (cf. [https://swc.rs/docs/configuration/swcrc](https://swc.rs/docs/configuration/swcrc))
-
-## Environment variables
-
-### `ENV`
-
-Define which environment config file should be used to run the application. Environment config files are located in the `/config` directory, are prefixed with `env-`. 
-
-For example, given the following config files:
-
-```
-├─ config
-│  ├─ env-default.json
-│  └─ env-prod.json   
+```text
+player "gesture-player" is running "gesture-sound.js"
 ```
 
-To start the server the `/config/env-prod.js` configuration file, you should run:
+### 3. Open the Web Interface
 
-```bash
-ENV=prod npm run start
-``` 
+From a web browser connected to the same network, open:
 
-If no `env` file is found, the application will generate a default config suitable for most development uses.
-
-### `PORT`
-
-Override the port defined in the config file. 
-
-For example, to launch the server on port `3000` whatever the `port` value defined in the default configuration file, you should run:
-
-```bash
-PORT=3000 npm run start
+```text
+http://<server-address>:8000
 ```
 
-## Emulating clients
+For example:
 
-In development it can be convenient to emulate several clients in the same browser window or same terminal
-
-### Browsers clients
-
-To emulate several browser clients in the same window, just append the query parameter `?emulate=[num_clients]` to the URL. For example to launch 10 clients side by side in the same window, you should run:
-
-```
-http://127.0.0.1:8000?emulate=10
+```text
+http://192.168.1.86:8000
 ```
 
-### Node clients
+Because the `teacher` client is defined as the default browser client, its interface is available at the root address of the application.
 
-To emulate several node clients in the same terminal, you can use the `EMULATE=[num_clients]` environment variable. For example to launch 10 clients in parallel from the same terminal, you should run:
 
-```bash
-EMULATE=10 npm run watch thing
-```
+## Using the Interface
+
+### Recording a Gesture
+
+1. Select **Creation** mode.
+2. Select a sound from the soundbank or import a custom audio file.
+3. Enter a name for the gesture.
+4. Click **Record**.
+5. Wait for the end of the spoken countdown.
+6. Perform the gesture during the four-second recording period.
+7. Click **Test gesture**, then perform the movement again.
+8. Click **Validate** to save the gesture or **Cancel** to discard it.
+
+Several examples can be recorded to improve the learning of the same gesture.
+
+
+### Recognizing Gestures
+
+1. Record and validate at least one gesture example.
+2. Select **Play** mode.
+3. Perform one of the recorded gestures.
+4. The XMM model recognizes the gesture and triggers its associated sound.
+
+The intensity of the movement also controls the sound level.
+
+### Importing a Sound
+
+Drop one or more audio files into the import area of the interface.
+
+The following formats are accepted:
+
+- WAV;
+- MP3;
+- OGG;
+- M4A;
+- AAC;
+- FLAC;
+- AIF;
+- AIFF.
+
+Imported files are added to the list of available sounds and can then be associated with gestures.
+
+
+### Deleting Items
+
+The interface can be used to:
+
+- delete an imported sound;
+- delete an individual gesture example;
+- discard a gesture before validation;
+- delete all recorded gestures.
+
+
+
+## Resources
+
+- [CoMo framework](https://github.com/ircam-ismm/como)
+- [Soundworks documentation](https://soundworks.dev/)
+- [Soundworks API](https://soundworks.dev/api)
+
 
 ## Credits
 
-[soundworks](https://soundworks.dev) is developed by the ISMM team at Ircam
+This prototype was developed as part of the CoMo.education project within the ISMM team at Ircam.
+
+[Soundworks](https://soundworks.dev/) and [CoMo](https://github.com/ircam-ismm/como) are developed by the ISMM team at Ircam.
+
 
 ## License
 
 [BSD-3-Clause](./LICENSE)
+
+
+
+
+

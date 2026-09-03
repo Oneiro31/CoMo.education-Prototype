@@ -7,7 +7,7 @@ export const FRAME_TIMEOUT_INTERVAL_MS = 200;
 export const WAITING_LABEL_PREFIX = '__waiting__:';
 export const MODEL_LABEL_SEPARATOR = '|||';
 
-export const COUNTDOWN_SOUND_URL = 'http://192.168.1.86:8000/assets/Voice-record.wav';
+export const COUNTDOWN_SOUND_PATH = '/assets/Voice-record.wav';
 export const COUNTDOWN_SOUND_LABEL = 'Voice-record.wav'; // 3 seconds voice countdown
 
 export const RECORD_COUNTDOWN_DELAY_MS = 4000; // Recording starts 4 seconds after the countdown

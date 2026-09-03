@@ -21,23 +21,8 @@ async function bootstrap() {
   const como = new ComoClient(client);
   await como.start();
 
-  const comote = await como.sourceManager.createSource({
-    type: 'comote',
-    id: '0',
-    port: COMOTE_WS_PORT,
-    interval: 10,
-    verbose: false,
-  });
 
-
-  const playerId = como.playerManager.playerExists(APP_PLAYER_ID)
-    ? APP_PLAYER_ID
-    : await como.playerManager.createPlayer(comote, { id: APP_PLAYER_ID });
-
-  const player = await como.playerManager.getPlayer(playerId);
-
-
-  /*const lsm9ds1 = await como.sourceManager.createSource({
+  const lsm9ds1 = await como.sourceManager.createSource({
     type: 'lsm9ds1',
     id: '1',
     interval: 10,
@@ -49,7 +34,7 @@ async function bootstrap() {
     ? APP_PLAYER_ID
     : await como.playerManager.createPlayer(lsm9ds1, { id: APP_PLAYER_ID });
 
-  const player = await como.playerManager.getPlayer(playerId);*/
+  const player = await como.playerManager.getPlayer(playerId);
 
 
   await player.state.set({

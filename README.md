@@ -103,7 +103,7 @@ If the server IP address changes:
 
 
 
-## Modify the LSM9DS1 source
+## Creation and Modification of the LSM9DS1 source
 
 The motion source used by the prototype is defined in:
 

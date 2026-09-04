@@ -92,7 +92,6 @@ auth:
   password: ''
 ```
 
-The address specified in `serverAddress` must be reachable from the machine running the server.
 
 If the server IP address changes:
 

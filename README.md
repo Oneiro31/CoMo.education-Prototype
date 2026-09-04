@@ -53,8 +53,8 @@ All machines must be connected to the same local network.
 Clone the repository:
 
 ```bash
-git clone git@github.com:Oneiro31/CoMo.education---Prototype-.git
-cd CoMo.education---Prototype-
+git clone git@github.com:Oneiro31/CoMo.education-Prototype.git
+cd CoMo.education-Prototype
 ```
 
 Install the dependencies:
